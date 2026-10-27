@@ -79,7 +79,10 @@ model. Definitions and the last numbers: `eval/ruler/README.md`.
 - **Wipe** — `python scripts/wipe.py [db_path]` clears the core's tables. A
   database from an older version (missing a table) is not an error: the
   missing tables are skipped and named in the output, and the wipe does not
-  create anything. Run it before and after an evaluation.
+  create anything. Run it before and after an evaluation. It clears the evaluation data only: the record of the
+  write settings (`core_write_settings`, above) stays, so a running service that is not restarted after a wipe can
+  keep writing and still starts at its next restart; with no data in the database the start-up replaces that record
+  with the current settings.
 - **Evaluation data** — the platform's data and any copy of it is used for
   that evaluation only and is deleted within 30 days of it finishing.
 - **Concurrency** — writes are serialized by one in-process lock (FIFO, with a
@@ -95,7 +98,7 @@ The image built from the `Dockerfile` is the submitted service. Its configuratio
 ruler decided on (below); it is written into the Dockerfile on purpose, not left to code defaults or to the
 host's environment page, so a variable missed on the host cannot quietly turn the meaning-based path off.
 
-**Deployed commit:** `<fill in: the commit the platform builds>`
+**Deployed commit:** the commit the tag `submission-1` points to (the same commit is given on the application form).
 
 ### What the image carries
 
@@ -121,6 +124,7 @@ pins the switches and those measured defaults against the Dockerfile and the cod
 | `API_KEY` | the key the platform sends with every request | the same value the platform has registered. Missing, blank or a development placeholder: the service **does not start** and the error names `API_KEY` |
 | `DASHSCOPE_API_KEY` | the embedding provider's key | missing or blank: the service **does not start** and the error names `DASHSCOPE_API_KEY` (never its value) |
 | `DASHSCOPE_BASE_URL` | only if the key belongs to the China site | the default is the international host; a key only works on its own region's host (otherwise HTTP 401 `invalid_api_key`) |
+| `DB_PATH` | optional: where the SQLite file lives | the image default is `/data/memory.db`; a value set on the host wins over it. A service that starts on a database written under other settings refuses to start (the start-up check described above), so a new file name is also how a host starts clean |
 
 No key is ever written into the image, a file or a log. Mount a persistent volume at `/data` if the host can,
 so a restart does not drop what the platform has already written.

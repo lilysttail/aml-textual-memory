@@ -2,6 +2,11 @@
 deleted when done). Single implementation: db.wipe() (the table registry
 decides what gets cleared). Also removes the WAL/SHM sidecar files.
 
+The record of which write settings the data was written under (core_write_settings) is not evaluation data and
+stays: the service checks it only at start-up, so a wipe that deleted it would leave a running service that
+writes new data with no record and refuses to start at its next restart. With no data in the database the
+start-up replaces the record with the current settings, so keeping it never blocks a change of settings.
+
 The service writes through the shared core, so the core's tables are the ones
 that hold the evaluation data. A database from an older version may not have
 every table: those are skipped (and named in the output), never created — a

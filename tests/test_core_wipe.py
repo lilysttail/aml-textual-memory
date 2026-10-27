@@ -18,8 +18,14 @@ import sys
 import tempfile
 import uuid
 
+import pytest
+
 from core.db import TABLES as CORE_TABLES
 from scripts.wipe import RETIRED_TABLES
+
+# The core's tables that a wipe leaves alone because they are not evaluation data: the record of which write
+# settings the data was written under (core/write_settings.py checks it at start-up only).
+KEPT_BY_A_WIPE = {"core_write_settings"}
 
 # One row for every table of the core's registry. The list of tables comes
 # from the registry (core.db.TABLES); this dict only says how to fill one.
@@ -124,9 +130,68 @@ def test_wipe_clears_the_core_tables():
     try:
         for name in CORE_TABLES:
             n = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
-            assert n == 0, f"{name} still has {n} rows"
+            if name in KEPT_BY_A_WIPE:
+                assert n == 1, f"{name} is not evaluation data: a wipe must leave it alone ({n} rows)"
+            else:
+                assert n == 0, f"{name} still has {n} rows"
     finally:
         conn.close()
+    cleared = [l for l in r.stdout.splitlines() if l.startswith("cleared:")][0]
+    for name in KEPT_BY_A_WIPE:
+        assert name not in cleared, cleared
+
+
+def test_the_registry_and_the_wipe_agree_on_what_is_evaluation_data():
+    """The wipe clears exactly the registry's evaluation-data tables — and the one table that is not evaluation data
+    (the record of the write settings) is named here, so moving it back into the data set is a visible change."""
+    from core.db import business_tables
+    assert KEPT_BY_A_WIPE == {"core_write_settings"}
+    assert set(business_tables()) == set(CORE_TABLES) - KEPT_BY_A_WIPE
+
+
+def test_wipe_then_write_without_a_restart_then_restart_still_starts():
+    """The operator's path: wipe the live database, the running service is NOT restarted and keeps taking
+    writes, and the host restarts the service later. Wiping the record of the write settings along with the data
+    left data without a record, and that restart refused to start (WriteSettingsMismatch)."""
+    from core import CoreConfig, Record, build
+    path = _db_path()
+    cfg = lambda: CoreConfig(db_path=path, paths=("keyword",))
+    running = build(cfg())
+    running.write([Record(record_id="r1", session_id="s", text="giraffe before the wipe", speaker="user")],
+                  space_id="u", batch_id="b1")
+    r = subprocess.run([sys.executable, WIPE_SCRIPT, path], capture_output=True, text=True)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    # no restart: the same running core takes a write after the wipe
+    running.write([Record(record_id="r2", session_id="s", text="zebra after the wipe", speaker="user")],
+                  space_id="u", batch_id="b2")
+    restarted = build(cfg())          # must not raise
+    hits = restarted.search("zebra", space_id="u", top_k=5)
+    assert [h.record_id for h in hits] == ["r2"], hits
+    assert restarted.search("giraffe", space_id="u", top_k=5) == []   # the wiped data is gone
+
+
+def test_wipe_then_start_with_new_settings_records_the_new_settings():
+    """What always worked has to keep working: data written under the old settings, a change of settings, a wipe,
+    a start — the start records the NEW settings (the kept old record does not block it), and from then on
+    the database belongs to the new settings."""
+    from core import CoreConfig, Record, build
+    from core.db import Database
+    from core.write_settings import WriteSettingsMismatch, recorded
+    path = _db_path()
+    old = build(CoreConfig(db_path=path, paths=("keyword",), stem_english=False))
+    old.write([Record(record_id="r1", session_id="s", text="the cats slept", speaker="user")],
+              space_id="u", batch_id="b1")
+    assert recorded(Database(path))["stem"] == "0"
+    r = subprocess.run([sys.executable, WIPE_SCRIPT, path], capture_output=True, text=True)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    new_cfg = lambda: CoreConfig(db_path=path, paths=("keyword",), stem_english=True)
+    new = build(new_cfg())            # the database is empty: no refusal, the new settings are recorded
+    assert recorded(Database(path))["stem"].startswith("snowball-english"), recorded(Database(path))
+    new.write([Record(record_id="r2", session_id="s", text="the cats slept", speaker="user")],
+              space_id="u", batch_id="b2")
+    build(new_cfg())                  # restart under the new settings: starts
+    with pytest.raises(WriteSettingsMismatch):   # and the old settings are now the wrong ones for this data
+        build(CoreConfig(db_path=path, paths=("keyword",), stem_english=False))
 
 
 def test_wipe_clears_the_retired_tables_of_the_old_service_too():

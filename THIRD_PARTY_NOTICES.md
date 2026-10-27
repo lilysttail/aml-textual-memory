@@ -4,9 +4,32 @@ One line per borrowed thing: where it came from, licence, what we took, what we
 changed.
 
 This repository starts at its first public commit. The project's earlier development history is kept
-privately; code carried over from it is our own work and is marked as such in the provenance headers.
+privately; code carried over from it is our own work and is marked as such in the provenance headers,
+with one exception: the first-cycle entry listed first below.
 
 ## Code
+
+- **tlysanhuo/agent-memory-challenge** (https://github.com/tlysanhuo/agent-memory-challenge; GitHub account
+  `tlysanhuo`) — the first-cycle textual-track entry for the Agent Memory Leaderboard, MIT licence. We used it
+  as a reference for the first version of this service's HTTP shell, file by file:
+  - app/models.py — the field names and structure of the Add / Search contract (request_id; messages with
+    role, timestamp and content; a search hit whose content carries "[YYYY-MM-DD HH:MM] role: text") follow
+    that entry, because the official API Guide could not be read at the time. We wrote the classes ourselves;
+    whether any passage is word for word the same we cannot say without the original.
+  - app/auth.py — the contract behaviour (the three accepted headers Bearer, Token and X-Api-Key; a public
+    /health) was confirmed from that entry; the code is ordinary FastAPI written to that behaviour.
+  - scripts/smoke_local.py — only the idea of having a local smoke script comes from it; the content is ours
+    (our own payloads, idempotent replay, a per-user isolation check).
+  - tests/test_contract.py — no code taken; written from the contract. It covers the same points as that
+    entry's tests because the contract requires them.
+
+  Idempotency and concurrency are our own: a unique key in the database plus one in-process write lock
+  (core/db.py, tests/test_write_lock.py), not that entry's way of claiming a request before writing it.
+  **Limits of this entry:** that repository was no longer publicly reachable when we checked on 2026-10-27
+  (anonymous and signed-in GitHub requests both answer "not found"; no copy at Software Heritage or the
+  Wayback Machine). We could not compare line by line, and we could not read its LICENSE file, so we cannot
+  name the copyright holder of that licence. This entry is written from our own project records, not from a
+  diff.
 
 - **SQLite FTS5 + BM25 scoring** — the FTS5 module of SQLite (public domain).
   We took the facts its documentation states: the bm25 function returns a
@@ -60,7 +83,7 @@ this repository. core/README.md lists them all:
 
 | in core/ | from | what we changed |
 |---|---|---|
-| db.py | app/db.py | the table registry is the core's own seven tables; the write lock can be shared with another Database on the same file |
+| db.py | app/db.py | the table registry is the core's own eight tables; the write lock can be shared with another Database on the same file |
 | store.py | app/memory_store.py | one content column became structured columns; added the turn-number cursor, the neighbour lookup, the atomic snapshot rebuild, and the tokenizer plug |
 | recall.py | app/recall.py | only the keyword and dense routes; the dense one gained exclude_lines |
 | rerank.py | app/retrieval.py | user_id -> space_id, mem_id -> record_id, the text comes from the core's own rows |

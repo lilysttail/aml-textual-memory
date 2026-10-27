@@ -18,7 +18,7 @@ Usage (the key is read from the environment, never from an argument, and is neve
 
 Exit code 0 = both checks passed; 1 = something is wrong (the lines above it say what).
 The four memories stay in the live database under the throw-away user (`deploy-check-...`); they belong to
-no evaluation user. `scripts/wipe.py` clears the whole database after the evaluation anyway.
+no evaluation user. `scripts/wipe.py` clears the evaluation data after the evaluation anyway (the record of the write settings stays).
 """
 import argparse
 import json

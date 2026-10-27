@@ -73,7 +73,9 @@ core_vectors(model, content_hash, dim, vec)
 core_batches(space_id, batch_id, PRIMARY KEY(space_id, batch_id))
 core_sessions(space_id, session_id, next_turn_index, PRIMARY KEY(space_id, session_id))
 core_spaces(space_id PRIMARY KEY, snapshot_id, updated_at)
-core_write_settings(name PRIMARY KEY, value)   -- write-time settings (tokenizer / write-format version)
+core_write_settings(name PRIMARY KEY, value)   -- write-time settings (tokenizer / write-format version); a wipe leaves it
+core_pending_vectors(space_id, record_id, content_hash, reason, retry_count, last_attempt_at,
+                     PRIMARY KEY(space_id, record_id))   -- why a vector was not computed at write time (explains, does not decide)
 ```
 
 The FTS `body` holds the **tokenized word sequence** (writing and querying use the same tokenizer). Without a plugged-in
@@ -113,7 +115,7 @@ These come from this project's own earlier service layer, which is not part of t
 
 | From | Used in | What changed |
 |---|---|---|
-| `app/db.py` | `core/db.py` | the table list is the core's own six tables; the shared write lock can be injected |
+| `app/db.py` | `core/db.py` | the table list is the core's own eight tables; the shared write lock can be injected |
 | `app/memory_store.py` | `core/store.py` | the single content column is split into structured columns; neighbours, turn numbering and snapshot generation added; the tokenizer became a plug |
 | `app/recall.py` | `core/recall.py` | only the keyword / dense routes are kept; dense takes an extra `exclude_lines` |
 | `app/retrieval.py` | `core/rerank.py` | user_id -> space_id, mem_id -> record_id, the content is taken from `text` |

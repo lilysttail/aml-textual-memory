@@ -1,8 +1,11 @@
 """Pydantic models for the AML Add/Search contract.
 
 Source: participant implementation of the official AML contract
-(https://github.com/tlysanhuo/agent-memory-challenge).
-After key registration, verify against the official API Guide.
+(https://github.com/tlysanhuo/agent-memory-challenge) - the first-cycle
+textual-track entry, MIT licence. That repository was no longer publicly
+reachable when we checked on 2026-10-27; THIRD_PARTY_NOTICES.md says what we
+took from it. Checked item by item against the official API Guide
+(https://agentmemoryleaderboard.ai/api-guide) on 2026-10-27.
 """
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator

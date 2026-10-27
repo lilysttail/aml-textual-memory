@@ -1,7 +1,7 @@
 """Database: connections, the write lock, the table registry, and wipe.
 
 复制自本项目早期服务层的 app/db.py（本仓库不含该文件；2026-10-21，小助手）。改了：
-  - 表注册表换成核心自己的七张表（core_*）；比赛服务用的那几张表一张都不进核心；
+  - 表注册表换成核心自己的八张表（core_*）；比赛服务用的那几张表一张都不进核心；
   - 去掉为老列做兼容迁移的那段 ALTER（核心没有那一列）；
   - 索引换成核心的三条。
 没改：连接方式、写锁（单写者 + 有界等待）、busy_timeout、StoreBusy 语义、
@@ -13,6 +13,8 @@ import threading
 from contextlib import contextmanager
 
 # name -> (DDL, is_evaluation_data). is_data=True tables are wiped by wipe().
+# A table that is NOT evaluation data (is_data=False) is never cleared by a wipe: it describes how the database is to
+# be read, not what the evaluation put in it (core_write_settings is the one: see its entry).
 TABLES = {
     # 一条记录 = 一条消息。主键是 (space_id, record_id)：两个空间用同一个
     # record_id 各存各的，谁也抢不到谁。
@@ -42,8 +44,11 @@ TABLES = {
                      space_id TEXT PRIMARY KEY, snapshot_id TEXT, updated_at TEXT)""", True),
     # 核心自己的写入设置（core/write_settings.py）：数据是按哪些设置写进去的。
     # 换切词器之后旧索引会用错的词回答，所以对不上就拒启动。
+    # 不是评测数据（is_data=False），清库不动它：启动时只核 / 记一次（core/write_settings.py check_or_record），
+    # 写数据时不回写；清库把它一起清掉的话，清库后不重启就接着写数据，数据在、记录没了，下一次重启就拒启动
+    # 。留着它不会挡路：库里没有数据时启动会把它换成当前设置。
     "core_write_settings": ("""CREATE TABLE IF NOT EXISTS core_write_settings(
-                     name TEXT PRIMARY KEY, value TEXT)""", True),
+                     name TEXT PRIMARY KEY, value TEXT)""", False),
     # 写入时向量计算失败的记录。这张表只解释「为什么这次没算成」，
     # 不参与「缺不缺」的判断——缺不缺以 core_records + core_vectors 的事实差集为准。
     "core_pending_vectors": ("""CREATE TABLE IF NOT EXISTS core_pending_vectors(
