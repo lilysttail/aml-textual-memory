@@ -82,7 +82,12 @@ model. Definitions and the last numbers: `eval/ruler/README.md`.
   create anything. Run it before and after an evaluation. It clears the evaluation data only: the record of the
   write settings (`core_write_settings`, above) stays, so a running service that is not restarted after a wipe can
   keep writing and still starts at its next restart; with no data in the database the start-up replaces that record
-  with the current settings.
+  with the current settings. It can be run while the service is running: it never deletes the database's side files
+  (`-wal`, `-shm`), which belong to every process that has the database open (deleting them from under the service
+  loses the wipe and makes every new connection fail with "disk I/O error"). It ends by asking SQLite to fold its log
+  into the database file and prints the outcome as the last line, `checkpoint: truncated` (done) or
+  `checkpoint: partial` (another connection was reading; the wipe is committed and visible to everyone anyway,
+  SQLite folds the rest in later).
 - **Evaluation data** — the platform's data and any copy of it is used for
   that evaluation only and is deleted within 30 days of it finishing.
 - **Concurrency** — writes are serialized by one in-process lock (FIFO, with a

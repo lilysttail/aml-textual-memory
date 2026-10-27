@@ -194,6 +194,119 @@ def test_wipe_then_start_with_new_settings_records_the_new_settings():
         build(CoreConfig(db_path=path, paths=("keyword",), stem_english=False))
 
 
+# --- the wipe and a database that is open somewhere else (the running service) ------------------------------------
+
+def _seed_core(path, n=16, **kw):
+    """A real database with `n` evaluation rows and the three write-settings rows, made the way the service makes it."""
+    from core.db import Database
+    db = Database(path, **kw)
+    db.create_schema()
+    with db.writing() as conn:
+        for i in range(n):
+            conn.execute("INSERT INTO core_records(space_id, record_id, session_id, text) VALUES ('u', ?, 's', 'hello')", (f"r{i}",))
+            conn.execute("INSERT INTO core_fts(space_id, record_id, session_id, speaker, body) VALUES ('u', ?, 's', 'user', 'hello')", (f"r{i}",))
+        from core import CoreConfig
+        from core.write_settings import current
+        conn.executemany("INSERT INTO core_write_settings(name, value) VALUES (?, ?)",
+                         sorted(current(CoreConfig(db_path=path, paths=("keyword",))).items()))   # the settings a real start records
+        conn.commit()
+    return db
+
+
+def _counts(path):
+    conn = sqlite3.connect(path)
+    try:
+        return (conn.execute("SELECT COUNT(*) FROM core_records").fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM core_write_settings").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def test_the_wipe_script_never_deletes_the_side_files_of_a_database(monkeypatch):
+    """The running service holds the database open while the operator wipes it. Deleting its `-wal` / `-shm` from under it
+    drops what the wipe just committed (it is still in the `-wal`) and breaks every later connection ("disk I/O error"; the
+    service's /health answers 500). On Linux a file can be deleted while it is open; on Windows the delete fails, so a test
+    that only watched the outcome could not see the bug there. So this one watches the calls: no deletion of any file of
+    that database, whatever the platform."""
+    import pathlib
+    import runpy
+    path = _db_path()
+    db = _seed_core(path)
+    held = db.connect()                       # the service's connection: while it is open the side files exist
+    held.execute("SELECT COUNT(*) FROM core_records").fetchone()
+    assert os.path.exists(path + "-wal") and os.path.exists(path + "-shm"), "the side files must exist for this test to mean anything"
+    asked = []
+    real_remove, real_unlink, real_path_unlink = os.remove, os.unlink, pathlib.Path.unlink
+
+    def spy(real):
+        def inner(target, *a, **k):
+            asked.append(os.fspath(target))
+            return real(target, *a, **k)
+        return inner
+
+    monkeypatch.setattr(os, "remove", spy(real_remove))
+    monkeypatch.setattr(os, "unlink", spy(real_unlink))
+    monkeypatch.setattr(pathlib.Path, "unlink", lambda self, *a, **k: (asked.append(str(self)), real_path_unlink(self, *a, **k))[1])
+    monkeypatch.setattr(sys, "argv", [WIPE_SCRIPT, path])
+    runpy.run_path(WIPE_SCRIPT, run_name="__main__")
+    held.close()
+    mine = [a for a in asked if os.path.abspath(a).startswith(os.path.abspath(path))]
+    assert mine == [], f"the wipe deleted files of the database: {mine}"
+
+
+def test_wipe_while_another_connection_holds_the_database_open():
+    """The operator's wipe on the live service (the Zeabur Command), end to end: one connection stays open the way the
+    service's does, the REAL script wipes in another process. Afterwards a NEW connection (every /health is one) must
+    work and see the wiped database, the open connection must read and write, the database must be sound, and a restart
+    must start. (On Windows the old behaviour is hidden — the delete just fails — so the test above is the one that
+    fails there; on Linux this one fails too: "disk I/O error".)"""
+    from core import CoreConfig, build
+    from core.db import Database
+    path = _db_path()
+    db = _seed_core(path)
+    held = db.connect()
+    assert held.execute("SELECT COUNT(*) FROM core_records").fetchone()[0] == 16
+    r = subprocess.run([sys.executable, WIPE_SCRIPT, path], capture_output=True, text=True)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert _counts(path) == (0, 3), "a new connection must see the wiped data and the kept write-settings record"
+    assert held.execute("SELECT COUNT(*) FROM core_records").fetchone()[0] == 0   # the service's own connection
+    held.execute("INSERT INTO core_records(space_id, record_id, session_id, text) VALUES ('u','after','s','written after the wipe')")
+    held.commit()
+    assert _counts(path) == (1, 3)
+    check = sqlite3.connect(path)
+    try:
+        assert check.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        check.close()
+    held.close()
+    build(CoreConfig(db_path=path, paths=("keyword",)))   # a restart of the service: must start (the record was kept)
+
+
+def test_wipe_reports_what_the_checkpoint_did():
+    """`checkpoint:` is the last line of the script's output: `truncated` when nobody else was reading (the log is folded
+    into the database file and emptied), `partial` when another connection pins a read (the wipe is committed and visible
+    anyway; SQLite folds the rest in later)."""
+    path = _db_path()
+    db = _seed_core(path)
+    r = subprocess.run([sys.executable, WIPE_SCRIPT, path], capture_output=True, text=True)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout.strip().splitlines()[-1] == "checkpoint: truncated", r.stdout
+    assert not os.path.exists(path + "-wal") or os.path.getsize(path + "-wal") == 0
+
+    path2 = _db_path()
+    db2 = _seed_core(path2, busy_timeout_ms=200)   # the checkpoint waits for readers at most this long
+    reader = db2.connect()
+    reader.execute("BEGIN")
+    assert reader.execute("SELECT COUNT(*) FROM core_records").fetchone()[0] == 16   # a read that stays open: it pins the log
+    result = db2.wipe()
+    assert result["checkpoint"] == "partial", result
+    assert _counts(path2) == (0, 3)                                                   # committed and visible to everyone
+    assert reader.execute("SELECT COUNT(*) FROM core_records").fetchone()[0] == 16   # the open reader keeps its own snapshot
+    reader.rollback()
+    assert reader.execute("SELECT COUNT(*) FROM core_records").fetchone()[0] == 0
+    reader.close()
+
+
 def test_wipe_clears_the_retired_tables_of_the_old_service_too():
     """Every old table has a row before the wipe and none after it — and the
     tables are still there (a wipe clears rows, it does not change the shape

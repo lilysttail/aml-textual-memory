@@ -158,9 +158,19 @@ class Database:
         never created and never dropped. The core does not care what they are
         called — the caller decides.
 
-        Returns {"cleared": [...], "skipped": [...]}."""
+        The wipe never touches the database's side files (`-wal`, `-shm`): while another process holds the
+        database open (the running service does), those files are theirs too, and deleting them from under it
+        loses what was just committed and breaks every later connection ("disk I/O error"). After the commit
+        it asks SQLite to fold the log into the database file (a checkpoint); SQLite removes the side files
+        itself when the last connection closes.
+
+        Returns {"cleared": [...], "skipped": [...], "checkpoint": one of "truncated" / "partial" /
+        "not_wal" / "unavailable"}: "truncated" = the log is folded into the database file and emptied;
+        "partial" = another connection was reading, SQLite folds the rest in later (the wipe is committed and
+        visible to everyone either way)."""
         cleared = []
         skipped = []
+        checkpoint = "unavailable"
         with self.writing() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
@@ -183,7 +193,20 @@ class Database:
                 if is_locked(e):
                     raise StoreBusy(str(e)) from e
                 raise
-        return {"cleared": cleared, "skipped": skipped}
+            checkpoint = _checkpoint(conn)
+        return {"cleared": cleared, "skipped": skipped, "checkpoint": checkpoint}
+
+
+def _checkpoint(conn) -> str:
+    """Best effort: fold the write-ahead log into the database file. Never raises and never deletes a file: the
+    wipe has already committed, a checkpoint that cannot finish only means SQLite does it later."""
+    try:
+        busy, log, _done = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.Error:
+        return "unavailable"
+    if log == -1:
+        return "not_wal"          # the database is not in WAL mode: there is no log to fold in
+    return "partial" if busy else "truncated"
 
 
 def table_exists(conn, name: str) -> bool:

@@ -1,6 +1,13 @@
 """Wipe the memory DB after evaluation (plan_v3 section E: evaluation data is
 deleted when done). Single implementation: db.wipe() (the table registry
-decides what gets cleared). Also removes the WAL/SHM sidecar files.
+decides what gets cleared).
+
+It never deletes the database's side files (-wal / -shm). The running service holds the same database open;
+on Linux a file can be deleted while it is open, and doing so to a live database drops the wipe's own
+committed changes (they are still in the -wal) and makes every later connection fail with "disk I/O
+error" - the service answers 500 on /health. Instead the wipe asks SQLite to fold its log into the database
+file (a checkpoint, printed as the `checkpoint:` line); SQLite removes the side files itself when the last
+connection closes.
 
 The record of which write settings the data was written under (core_write_settings) is not evaluation data and
 stays: the service checks it only at start-up, so a wipe that deleted it would leave a running service that
@@ -51,19 +58,12 @@ def main():
         print(f"no db at {db_path}, nothing to wipe")
         return
     result = CoreDatabase(db_path).wipe(extra_tables=RETIRED_TABLES)
-    # WAL checkpoint files are safe to remove once the DB is closed.
-    for suffix in ("-wal", "-shm"):
-        side = db_path + suffix
-        if os.path.exists(side):
-            try:
-                os.remove(side)
-            except OSError:
-                pass
     print(f"wiped {db_path}")
     if result["cleared"]:
         print("cleared: " + ", ".join(sorted(set(result["cleared"]))))
     if result["skipped"]:
         print("skipped (not in this database): " + ", ".join(sorted(set(result["skipped"]))))
+    print("checkpoint: " + result["checkpoint"])
 
 
 if __name__ == "__main__":
