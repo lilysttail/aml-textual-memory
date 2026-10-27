@@ -1,0 +1,15 @@
+{
+ "files": {
+  ".github/workflows/public-gate.yml": "44b3483e61465d072c4d66a13147b6155f95c126f08ee8adef02d51206b99989",
+  "tools/INSTALL.md": "ceb124c3aa4840bf72fca2549b6204df37e7d77da58a9c71f098221c86126149",
+  "tools/githooks/_run_gate.sh": "037193d408be27daa9ce9bec0ed58d81cdd56c24bcf0149d0bb006c907e1ee93",
+  "tools/githooks/commit-msg": "976773bc43313f8ce244371bc44cfc10f22946ca690896d2320469f396c25229",
+  "tools/githooks/pre-commit": "bf5c4dbd6663e1127a0a30cbfd985edb42e1831020a51b031f54b2255a8b5789",
+  "tools/githooks/pre-push": "205dae1050393b85ff06d92959e8bdf6929220443ec043b6b33095400955ccb1",
+  "tools/install_hooks.py": "96c5786c3290e6aa72814b740071691a93494eb91d578802bd1fd4e7fcb4f9c6",
+  "tools/public_gate.py": "4462b69b7dbf5cb2cd9f79d805b35b937e4277069c27db60becd722083ae2b8e",
+  "tools/public_gate.rules.json": "ba85127274ccc2b17b7579750eab3ce0bc715e5d46fcfade0de54df055b55178"
+ },
+ "source": "public_gate",
+ "version": 1
+}

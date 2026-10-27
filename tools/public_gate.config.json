@@ -1,0 +1,35 @@
+{
+ "version": 1,
+ "allowed_identities": [
+  {"name": "柯", "email": "ke@home"},
+  {"name": "津", "email": "jin@home"},
+  {"name": "小助手", "email": "helper@home"}
+ ],
+ "allowed_refs": {"branches": ["main"], "tags": ["submission-1"]},
+ "lightweight_tags": ["submission-1"],
+ "release_tag": "submission-1",
+ "allowed_url_prefixes": [
+  "http://127.0.0.1:",
+  "http://example.com",
+  "http://host:8000",
+  "http://localhost",
+  "https://api.kimi.com/coding/v1",
+  "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+  "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "https://example.app",
+  "https://example.com",
+  "https://example.invalid",
+  "https://github.com/lilysttail/aml-textual-memory",
+  "https://github.com/snowballstem/snowball",
+  "https://github.com/tlysanhuo/agent-memory-challenge",
+  "https://opencode.ai/",
+  "https://x.invalid"
+ ],
+ "doc_globs": ["*.md", "LICENSE"],
+ "max_file_bytes": 51200,
+ "large_file_registry": [],
+ "exempt": {"G6": ["tools/public_gate.config.json"]},
+ "license": {"path": "LICENSE", "holder_line": "Copyright (c) 2026 lilysttail and contributors"},
+ "release_placeholders": ["not decided yet", "to be filled", "TODO", "(internal)", "TBD"],
+ "third_party": {"dir": "", "notices": "THIRD_PARTY_NOTICES.md"}
+}

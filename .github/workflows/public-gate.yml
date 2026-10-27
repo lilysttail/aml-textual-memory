@@ -1,0 +1,44 @@
+name: public-gate
+
+# Runs the public_gate checks on every push and pull request.
+# Output follows the gate's own template (no sensitive values are ever echoed), from the very first run.
+# A missing denylist secret FAILS the job; it is never skipped.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gate files are the registered ones
+        env:
+          PUBLIC_GATE_INTEGRITY: ${{ secrets.PUBLIC_GATE_INTEGRITY }}
+        run: |
+          if [ -z "$PUBLIC_GATE_INTEGRITY" ]; then echo "GATE ERROR reason=integrity_secret_missing"; exit 2; fi
+          got="$(python3 tools/public_gate.py --print-integrity)" || exit 2
+          if [ "$got" != "$PUBLIC_GATE_INTEGRITY" ]; then echo "GATE ERROR reason=integrity_mismatch"; exit 2; fi
+
+      - name: Denylist is available
+        env:
+          PUBLIC_GATE_DENYLIST: ${{ secrets.PUBLIC_GATE_DENYLIST }}
+        run: |
+          if [ -z "$PUBLIC_GATE_DENYLIST" ]; then echo "GATE ERROR reason=denylist_missing"; exit 2; fi
+
+      - name: Full history
+        env:
+          PUBLIC_GATE_DENYLIST: ${{ secrets.PUBLIC_GATE_DENYLIST }}
+        run: python3 tools/public_gate.py --history --annotations
+
+      - name: Final tree
+        env:
+          PUBLIC_GATE_DENYLIST: ${{ secrets.PUBLIC_GATE_DENYLIST }}
+        run: python3 tools/public_gate.py --tree --annotations

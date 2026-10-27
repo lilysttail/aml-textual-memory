@@ -1,0 +1,6 @@
+#!/bin/sh
+# public_gate pre-push: target ref names and every commit about to be pushed.
+# git feeds "local_ref local_sha remote_ref remote_sha" lines on stdin; they are passed straight through.
+. "$(dirname "$0")/_run_gate.sh"
+run_gate --push-stdin
+exit $?

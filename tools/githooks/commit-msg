@@ -1,0 +1,5 @@
+#!/bin/sh
+# public_gate commit-msg: the message about to be committed.
+. "$(dirname "$0")/_run_gate.sh"
+run_gate --commit-msg "$1"
+exit $?

@@ -1,0 +1,5 @@
+#!/bin/sh
+# public_gate pre-commit: staged content, paths and the identity about to commit.
+. "$(dirname "$0")/_run_gate.sh"
+run_gate --staged
+exit $?
