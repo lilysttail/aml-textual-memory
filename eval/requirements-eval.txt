@@ -1,0 +1,3 @@
+# Extra deps for the A ruler (eval/), on top of the service requirements.
+pyarrow>=14
+huggingface_hub>=0.23

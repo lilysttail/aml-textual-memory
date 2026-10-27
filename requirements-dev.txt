@@ -1,0 +1,10 @@
+# Dev/eval-only deps for the LOCAL dense recall path (bge-small onnx) and the bench tools.
+# The deployed image installs requirements.txt only. It does NOT need onnxruntime / tokenizers (the image uses the
+# Aliyun embedder), but it DOES need numpy: the dense path (write: vectors, search: ranking) imports it, so numpy lives
+# in requirements.txt, pinned. tests/test_image_dependencies.py walks the deployed path with only what
+# requirements.txt provides and fails if a package is missing there.
+# The local embedder imports these lazily; if they're missing it errors loudly
+# (it never silently falls back to another path).
+onnxruntime>=1.17
+tokenizers>=0.15
+psutil>=5.9   # eval/mem_guard.py (bench memory watchdog)
