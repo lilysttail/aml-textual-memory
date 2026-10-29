@@ -48,4 +48,10 @@ class CoreConfig:
 
     # --- 搜索路径的限量补算---
     dense_backfill_m: int = 8      # 每次搜索最多补几条
-    dense_backfill_t: float = 2.0  # 补算的总时间上限（秒）
+    dense_backfill_t: float = 2.0  # 补算的总时间上限（秒），从拿到 query 向量之后算
+    dense_query_t: float = 3.0     # query 向量自己的期限（秒），从要它那一刻算、等闸位也在里面
+
+    # --- 内存里的空间索引（core/dense_index.py） ---
+    search_heavy_concurrency: int = 0         # 建索引 / 算相似度同时最多几个；0 = 本进程能用的 CPU 数
+    search_heavy_wait_s: float = 15.0         # 等不到名额多久就放弃（抛 SearchBusy，服务回 503）
+    search_cache_bytes: int = 640 * 2 ** 20   # 共享向量池 + 各空间索引的字节上限

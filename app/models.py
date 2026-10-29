@@ -35,7 +35,7 @@ class AddResponse(BaseModel):
 class SearchRequest(BaseModel):
     query: str                     # empty / blank -> 200 with no results (no stricter than the contract)
     options: Optional[List[str]] = None   # only present for multiple-choice items
-    user_id: str                   # empty -> an empty space, 200 with no results
+    user_id: str                   # an ordinary space name, "" included: searches what was added under exactly this value
     top_k: int = 10                # below 1 -> 200 with no results; the response never exceeds it
 
 

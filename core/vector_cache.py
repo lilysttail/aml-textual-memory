@@ -55,13 +55,15 @@ class VectorCache:
         self._inflight = {}   # content_hash -> _Flight
         self._lock = threading.Lock()
 
-    def get_or_compute(self, texts, deadline=None):
+    def get_or_compute(self, texts, deadline=None, wait_for_gate=False):
         """Vectors for *texts* (cached ones reused; missing ones computed).
 
         deadline: a time.monotonic() value. When given, every wait inside
         (gate, in-flight, between batches) uses the remaining time and gives
         up as soon as it runs out — the caller is not blocked past the
         deadline. Without it, the configured timeouts apply.
+        wait_for_gate: with a deadline, wait for a free slot of the gate up to the deadline instead of giving
+        up at once when the gate is full (a search's own query vector: without it the search has no dense half).
         """
         import numpy as np
         model = model_key(self._emb.model_name)
@@ -84,7 +86,7 @@ class VectorCache:
                     waits.append((h, fl))
 
         if mine:
-            self._compute_mine(model, mine, uniq, np, deadline)  # raises if our compute failed
+            self._compute_mine(model, mine, uniq, np, deadline, wait_for_gate)  # raises if our compute failed
 
         for h, fl in waits:
             if deadline is not None:
@@ -106,7 +108,7 @@ class VectorCache:
                 result[h] = got[h]
         return [np.frombuffer(result[h], dtype=np.float32) for h in order_hashes]
 
-    def _compute_mine(self, model, hashes, uniq, np, deadline=None):
+    def _compute_mine(self, model, hashes, uniq, np, deadline=None, wait_for_gate=False):
         err = None
         pending = list(hashes)
         try:
@@ -128,11 +130,15 @@ class VectorCache:
                     raise StoreBusy("embed backfill deadline exceeded")
                 chunk = pending[i:i + self._batch]
                 chunk_texts = [uniq[h] for h in chunk]
-                # With a deadline (search path), the gate is non-blocking:
-                # grab it or give up immediately. Without one (write path),
-                # wait up to the configured acquire timeout.
-                if not self._sem.acquire(
-                        timeout=0 if rem is not None else self._acq_to):
+                # With a deadline (search-time backfill), the gate is non-blocking:
+                # grab it or give up immediately — unless the caller asked to wait
+                # for it (a query vector), then up to the deadline. Without a
+                # deadline (write path), wait up to the configured acquire timeout.
+                if rem is None:
+                    gate_wait = self._acq_to
+                else:
+                    gate_wait = rem if wait_for_gate else 0
+                if not self._sem.acquire(timeout=gate_wait):
                     raise StoreBusy("embed concurrency gate unavailable")
                 try:
                     # The remaining budget becomes THIS call's HTTP timeout:
@@ -140,6 +146,9 @@ class VectorCache:
                     # running past it (the adapter turns the transport timeout
                     # into EmbedUnavailable). Without a deadline the configured
                     # per-request timeout applies.
+                    rem = _remaining(deadline)     # the time spent waiting for the gate is spent
+                    if rem is not None and rem <= 0:
+                        raise StoreBusy("embed deadline exceeded while waiting for the gate")
                     vecs = self._emb.embed(chunk_texts, timeout_s=rem)
                 finally:
                     self._sem.release()

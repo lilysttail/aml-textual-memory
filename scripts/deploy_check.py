@@ -58,6 +58,10 @@ class TransportFailure(Exception):
         self.code = code
 
 
+# Read back and printed, never compared with a fixed value (see _steps).
+DENSE_INDEX_KEYS = ("search_heavy_concurrency", "search_heavy_wait_s", "dense_query_t", "search_cache_mib", "numpy_threads")
+
+
 def check_health(body):
     """The problems found in a /health body (empty list = the running configuration is the decided one)."""
     if not isinstance(body, dict) or body.get("ok") is not True:
@@ -112,6 +116,10 @@ def _steps(key, http, lines, problems):
         problems += found
         if isinstance(health, dict) and isinstance(health.get("config"), dict):
             lines.append("  running configuration: " + json.dumps(health["config"], sort_keys=True))
+            cfg = health["config"]
+            # Information only (not checked: the number of CPUs differs between hosts). An older service has none.
+            lines.append("  dense index (as it took effect): " + ", ".join(
+                f"{k}={json.dumps(cfg.get(k))}" for k in DENSE_INDEX_KEYS))
         if found:
             return                                       # the memories below would prove nothing on a wrong config
 
@@ -135,9 +143,12 @@ def _steps(key, http, lines, problems):
     lines.append(f"  hits: {len(data)}; first: {data[0].get('content') if data else None!r}")
     problems += check_search(data)
 
-    status, health = http("GET", "/health", None, None)
-    if status == 200 and isinstance(health, dict):
-        lines.append(f"  pending_vectors after the search: {health.get('pending_vectors')} (information only)")
+    # /health still answers once the search has run (it does a fixed amount of work). The number of records
+    # still without a vector is not in /health: run scripts/count_missing_vectors.py inside the container.
+    status, _ = http("GET", "/health", None, None)
+    lines.append(f"GET /health after the search -> {status}")
+    if status != 200:
+        problems.append(f"/health answered HTTP {status} after the search")
     return
 
 

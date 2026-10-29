@@ -6,19 +6,23 @@
 """
 import sqlite3
 
-from .db import StoreBusy, is_locked
+from .db import StoreBusy, bump_generation, is_locked, vectors_generation_key
 
 
 class VectorStore:
     def __init__(self, db):
         self._db = db
 
-    def get_vectors(self, model, hashes):
-        """{content_hash: vec_bytes} for any cached vectors."""
+    def get_vectors(self, model, hashes, conn=None):
+        """{content_hash: vec_bytes} for any cached vectors.
+
+        conn: read over the caller's connection (and its snapshot); without it a connection of its own."""
         hs = list(hashes)
         if not hs:
             return {}
-        conn = self._db.connect()
+        own = conn is None
+        if own:
+            conn = self._db.connect()
         try:
             out = {}
             for i in range(0, len(hs), 500):
@@ -33,7 +37,8 @@ class VectorStore:
                 raise StoreBusy(str(e)) from e
             raise
         finally:
-            conn.close()
+            if own:
+                conn.close()
         return out
 
     def put_vectors(self, model, dim, rows):
@@ -44,10 +49,13 @@ class VectorStore:
         with self._db.writing() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                conn.executemany(
+                cur = conn.executemany(
                     "INSERT OR IGNORE INTO core_vectors(model, content_hash, dim, vec) "
                     "VALUES (?,?,?,?)",
                     [(model, h, dim, b) for h, b in rows])
+                if cur.rowcount:
+                    # new vectors exist: readers holding "this record has no vector yet" must look again
+                    bump_generation(conn, vectors_generation_key(model))
                 conn.commit()
             except sqlite3.OperationalError as e:
                 conn.rollback()

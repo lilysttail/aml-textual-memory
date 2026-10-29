@@ -7,8 +7,9 @@ configuration) GET /health raised AttributeError and returned 500. The old
 swallow (narrow exception scope) exposed it.
 
 Tests here pin:
-  - /health returns 2xx with a numeric pending_vectors while dense is on,
-    for both EMBED_PROVIDER values (dashscope / local);
+  - /health returns 2xx while dense is on, for both EMBED_PROVIDER values
+    (dashscope / local); it no longer carries pending_vectors (a full read of
+    every space) — scripts/count_missing_vectors.py gives that number;
   - a real database failure makes /health return 500, never "0 gaps".
 """
 import logging
@@ -61,7 +62,7 @@ def _seed(client, content="connection pool exhausted in the database client"):
 
 @pytest.mark.parametrize("embed_provider", ["dashscope", "local"])
 def test_health_ok_while_dense_on_both_providers(monkeypatch, embed_provider):
-    """开着 dense 打 /health：两种 EMBED_PROVIDER 都是 2xx、pending_vectors 是数字。"""
+    """开着 dense 打 /health：两种 EMBED_PROVIDER 都是 2xx、回 ok，不再带 pending_vectors。"""
     monkeypatch.setattr(app_main, "_build_embedder", lambda s: DownEmbedder())
     ov = {"embed_provider": embed_provider}
     if embed_provider == "dashscope":
@@ -71,8 +72,7 @@ def test_health_ok_while_dense_on_both_providers(monkeypatch, embed_provider):
         r = client.get("/health")
         assert r.status_code == 200, f"/health must be 2xx while dense is on, got {r.status_code}"
         body = r.json()
-        assert isinstance(body.get("pending_vectors"), int), \
-            f"pending_vectors must be a number, got {body!r}"
+        assert body.get("ok") is True and "pending_vectors" not in body, f"/health body: {body!r}"
 
 
 def test_health_db_failure_returns_500_not_zero_gaps(monkeypatch):
@@ -80,7 +80,7 @@ def test_health_db_failure_returns_500_not_zero_gaps(monkeypatch):
     monkeypatch.setattr(app_main, "_build_embedder", lambda s: DownEmbedder())
     with TestClient(app_main.make_app(_settings()), raise_server_exceptions=False) as client:
         _seed(client)
-        # Corrupt the vector store so the gap read fails.
+        # Drop the vector table: the table probe fails.
         db_path = client.app.state.core.db.path
         conn = sqlite3.connect(db_path)
         conn.execute("DROP TABLE core_vectors")

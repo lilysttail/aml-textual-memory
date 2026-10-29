@@ -30,7 +30,7 @@ GOOD_CONFIG = {"recall_paths": ["keyword", "dense"], "embed_provider": "dashscop
 def _health(**ov):
     cfg = dict(GOOD_CONFIG)
     cfg.update(ov)
-    return {"ok": True, "pending_vectors": 0, "config": cfg, "build": "0123456789ab"}
+    return {"ok": True, "config": cfg, "build": "0123456789ab"}
 
 
 # ---- check_health ----
@@ -67,7 +67,7 @@ def test_a_service_with_no_build_key_at_all_is_a_problem():
 
 
 def test_an_old_service_without_a_config_section_is_a_problem():
-    problems = dc.check_health({"ok": True, "pending_vectors": 0})
+    problems = dc.check_health({"ok": True})
     assert problems and "older version" in problems[0]
 
 
@@ -119,6 +119,17 @@ def test_run_passes_on_a_good_service_and_asks_with_top_k_100():
     assert search[2]["top_k"] == 100 and search[2]["query"] == dc.QUERY and search[3] == KEY
     add = [s for s in http.seen if s[1] == "/add"][0]
     assert len(add[2]["messages"]) == 4 and add[2]["user_id"].startswith("deploy-check-")
+
+
+def test_run_prints_the_dense_index_settings_without_judging_them():
+    """The dense index's read-back values are printed (one line) and never make a problem: CPUs differ by host."""
+    hits = [{"content": "[x] user: I adopted a rescue greyhound named Biscuit last spring."}]
+    odd = {"search_heavy_concurrency": 7, "search_heavy_wait_s": 1.0, "dense_query_t": 0.5, "search_cache_mib": 1,
+           "numpy_threads": {"OPENBLAS_NUM_THREADS": "28"}}
+    problems, lines = dc.run("https://x.invalid", KEY, _canned(_health(**odd), hits))
+    assert problems == []
+    line = [l for l in lines if "dense index (as it took effect)" in l]
+    assert len(line) == 1 and "search_heavy_concurrency=7" in line[0] and '"OPENBLAS_NUM_THREADS": "28"' in line[0], lines
 
 
 def test_run_stops_before_writing_when_the_configuration_is_wrong():

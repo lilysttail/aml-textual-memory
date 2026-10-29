@@ -5,9 +5,9 @@
   - user_id -> space_id，mem_id -> record_id；
   - DenseRecall 多一个 exclude_lines：某些线（终端行）不进向量路，但仍进
     关键词索引；
-  - DenseRecall 的候选集只取已有向量的记录 + 限量补算：
-    补算和 query 向量都带同一个 deadline，到点立刻放弃（不等完再看表），
-    闸满/接口慢/同段在算都不会拖住搜索。
+  - DenseRecall 的候选集来自内存里的空间索引（core/dense_index.py：建一次、留着、每次用前核代际），
+    不再每次整份重读；query 向量有自己的期限（从要它那一刻算，可以在期限内等闸位），
+    限量补算用之后剩下的时间、不等闸；到点立刻放弃，不等完再看表。
 没改：每路只出 [(record_id, score)]、各路互不知情、融合在 rerank 层。
 
 两层召回（任务层）不进核心：那是代码赛道的东西，留给比赛壳，单 3 清理。
@@ -18,7 +18,6 @@ import time
 
 from .db import StoreBusy
 from .embedder import EmbedUnavailable
-from .vector_helper import content_hash as _content_hash
 from .vector_helper import model_key as _model_key
 
 log = logging.getLogger("core.recall")
@@ -28,6 +27,8 @@ log = logging.getLogger("core.recall")
 # skip the backfill and use only the vectors already in the cache.
 DEFAULT_BACKFILL_M = 8
 DEFAULT_BACKFILL_T = 2.0
+# The query vector's own deadline (seconds), from when it is asked for, waiting for the embedding gate included.
+DEFAULT_QUERY_T = 3.0
 
 
 class KeywordRecall:
@@ -44,88 +45,81 @@ class KeywordRecall:
 
 
 class DenseRecall:
-    """Semantic recall over vectors (full pool cosine).
+    """Semantic recall over vectors (the whole space, ranked by similarity).
 
-    Rerank lives in the retrieval layer: rerank() re-orders the candidate
-    pool with vectors; DenseRecall itself only ranks the whole space.
+    The space's "record -> vector" table comes from the in-memory DenseIndex (core/dense_index.py): built once,
+    kept between searches, checked against the change counters on every use. A search then costs one query
+    vector and one similarity pass — not a re-read of the space.
+
+    Order inside one search:
+      1. the space's index (may wait for a heavy-work slot; past the limit SearchBusy fails the search);
+      2. the query vector, under its OWN deadline (`query_t`) that starts when it is asked for and includes
+         waiting for a slot of the embedding gate — earlier work cannot use it up;
+      3. similarities;
+      4. with the time left in `backfill_t` (counted from here): at most M records that still have no vector
+         get one and join this search's ranking (the gate is not waited for).
+    Rerank lives in the retrieval layer.
     """
 
     name = "dense"
 
     def __init__(self, store, vector_cache, enabled=True, exclude_lines=(),
-                 backfill_m=None, backfill_t=None):
+                 backfill_m=None, backfill_t=None, query_t=None, index=None):
+        from .dense_index import DenseIndex
         self._store = store
         self._vc = vector_cache
         self.enabled = enabled
         self._exclude_lines = tuple(exclude_lines or ())
         self._backfill_m = DEFAULT_BACKFILL_M if backfill_m is None else backfill_m
         self._backfill_t = DEFAULT_BACKFILL_T if backfill_t is None else backfill_t
+        self._query_t = DEFAULT_QUERY_T if query_t is None else query_t
+        self._index = index if index is not None else DenseIndex(
+            store._db, store, vector_cache._vec, _model_key(vector_cache._emb.model_name),
+            exclude_lines=self._exclude_lines)
+
+    @property
+    def index(self):
+        return self._index
 
     def candidates(self, space_id, query, options, limit):
-        import numpy as np
-
-        items = self._store.iter_records(space_id, exclude_lines=self._exclude_lines)
-        if not items:
-            return []
-        ids = [i for i, _ in items]
-        contents = [c for _, c in items]
-
-        # One deadline covers the whole dense path of this search: the
-        # limited backfill AND the query vector. When it runs out we give
-        # up immediately — never "wait, then check the clock".
-        deadline = time.monotonic() + self._backfill_t
-
-        model = _model_key(self._vc._emb.model_name)
-        hashes = [_content_hash(t) for t in contents]
-        cached = self._vc._vec.get_vectors(model, hashes)
-
-        kept_ids = []
-        kept_vecs = []
-        missing_texts = []
-        missing_positions = []  # original index of each missing text
-
-        for i, (h, t) in enumerate(zip(hashes, contents)):
-            if h in cached:
-                kept_ids.append(ids[i])
-                kept_vecs.append(np.frombuffer(cached[h], dtype=np.float32))
-            else:
-                missing_texts.append(t)
-                missing_positions.append(i)
-
-        # Limited backfill: at most M texts, bounded by the deadline.
-        # get_or_compute(deadline=...) gives up inside (gate, in-flight,
-        # between batches) as soon as the time runs out. Only the vectors
-        # that actually came back participate; the rest wait for the next
-        # backfill pass.
-        if missing_texts and self._backfill_m > 0:
-            batch = missing_texts[:self._backfill_m]
-            try:
-                new_vecs = self._vc.get_or_compute(batch, deadline=deadline)
-                for i, vec in enumerate(new_vecs):
-                    orig_idx = missing_positions[i]
-                    kept_ids.append(ids[orig_idx])
-                    kept_vecs.append(np.asarray(vec, dtype=np.float32))
-            except (StoreBusy, EmbedUnavailable) as e:
-                # Backfill gave up (deadline / gate / provider). The vectors
-                # already computed before the give-up are cached; the rest
-                # wait for the next pass. Search proceeds with what we have.
-                log.warning("dense backfill skipped: %s", e)
-            # No bare except: a real bug (SQLite error, logic error) must
-            # propagate and be visible, not masquerade as "dense down".
-
-        if not kept_vecs:
-            return []
-
-        # The query vector is under the same deadline. If it can't be
-        # computed in time, dense has nothing to rank against — skip the
-        # path (keyword still answers).
+        idx = self._index.get(space_id)              # SearchBusy propagates: the search answers 503
         try:
-            qv = np.asarray(self._vc.get_or_compute([query], deadline=deadline)[0])
+            return self._rank(idx, query, limit)
+        finally:
+            self._index.done(idx)                    # end the lease: the index may now be released / evicted
+
+    def _rank(self, idx, query, limit):
+        import numpy as np
+        if not idx.ids and not idx.missing:
+            return []
+
+        try:
+            deadline = time.monotonic() + self._query_t
+            qv = np.asarray(self._vc.get_or_compute([query], deadline=deadline, wait_for_gate=True)[0],
+                            dtype=np.float32)
         except (StoreBusy, EmbedUnavailable) as e:
+            # No query vector in time: dense has nothing to rank against — skip the path (keyword still answers).
             log.warning("dense query vector skipped: %s", e)
             return []
 
-        mat = np.vstack(kept_vecs)
-        sims = mat @ qv
-        order = np.argsort(-sims)[:limit]
-        return [(kept_ids[k], float(sims[k])) for k in order]
+        ids = list(idx.ids)
+        sims = list(self._index.scores(idx, qv)) if idx.ids else []
+
+        # Limited backfill with what is left of backfill_t: only vectors that came back join this ranking;
+        # the rest wait for a later search or the backfill script. No bare except: a real bug must surface.
+        if idx.missing and self._backfill_m > 0:
+            batch = idx.missing[:self._backfill_m]
+            try:
+                new_vecs = self._vc.get_or_compute([t for _, _, t in batch],
+                                                   deadline=time.monotonic() + self._backfill_t)
+                for (rid, _, _), vec in zip(batch, new_vecs):
+                    ids.append(rid)
+                    sims.append(float(np.asarray(vec, dtype=np.float32) @ qv))
+            except (StoreBusy, EmbedUnavailable) as e:
+                log.warning("dense backfill skipped: %s", e)
+
+        if not ids:
+            return []
+        sims = np.asarray(sims, dtype=np.float32)
+        order = np.argsort(-sims)[:limit]          # same ordering call as before the in-memory index (ties included)
+        return [(ids[k], float(sims[k])) for k in order]

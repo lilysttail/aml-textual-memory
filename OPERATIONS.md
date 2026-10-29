@@ -43,6 +43,12 @@ interface, the field mapping and the provenance of every copied part.
 | `DASHSCOPE_BASE_URL` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | the international (Singapore) host; a China-site key needs `https://dashscope.aliyuncs.com/compatible-mode/v1` (a key only works on its own region's host) |
 | `CONTENT_MAX_CHARS` | `4000` | budget for a candidate's rendered text |
 | `NEIGHBOUR_CANDIDATES` | `1` | the neighbouring turns as candidates of their own. **On** in the submitted version: the ruler says +3.98 points of evidence recall for +10.3% characters. Set it to 0 to turn it off |
+| `DENSE_QUERY_T` | `3.0` | seconds the query vector may take, counted from when it is asked for, waiting for a place at the embedding gate included. Past it the search answers from keywords alone (logged as `dense query vector skipped`) |
+| `DENSE_BACKFILL_M` / `DENSE_BACKFILL_T` | 8 / 2.0 | after the query vector: at most M records still without a vector get one during the search, within T seconds; the gate is not waited for |
+| `SEARCH_HEAVY_CONCURRENCY` | `0` | how many searches may build a space's in-memory index or compute similarities at once; `0` = the CPUs the process may use (the container's CPU quota, not the host's count) |
+| `SEARCH_HEAVY_WAIT_S` | `15` | how long a search waits for that; past it the search answers `503` (the platform retries) |
+| `SEARCH_CACHE_MIB` | `640` | memory budget of the in-memory dense index: the shared vector pool plus every space's index. Least recently used spaces leave when it is full |
+| `OPENBLAS_NUM_THREADS` / `OMP_NUM_THREADS` / `MKL_NUM_THREADS` | `1` | set by the service package before numpy loads (a value in the environment is kept). In a container numpy would otherwise start one thread per **host** CPU and stall the container's CPU quota |
 
 Negative timeouts, unknown recall paths and invalid numbers fail at startup.
 
@@ -92,7 +98,35 @@ model. Definitions and the last numbers: `eval/ruler/README.md`.
   that evaluation only and is deleted within 30 days of it finishing.
 - **Concurrency** — writes are serialized by one in-process lock (FIFO, with a
   bounded wait); a wait that runs out answers `503` so the platform retries.
-  Reads are not gated (WAL).
+  Reads are not gated (WAL), except the heavy part of the meaning-based path (building or refreshing a space's
+  in-memory index, computing similarities): at most `SEARCH_HEAVY_CONCURRENCY` at once, and a search that cannot
+  get a place within `SEARCH_HEAVY_WAIT_S` answers `503`. A search waiting for another search's build or refresh
+  of the same space waits at most `SEARCH_HEAVY_WAIT_S` too, then answers `503`.
+- **The in-memory dense index** (`core/dense_index.py`) — the first search in a space reads the space once (its
+  records, the sha256 of each text, their stored vectors) and keeps a "record → vector" table in memory; later
+  searches only compute the query vector and one similarity pass. Searches that arrive at a cold space together
+  share one read (and searches that arrive after new vectors share one look-up of the missing ones). A vector is
+  held once however many spaces contain its text (a shared pool with reference counts); when the pool plus the
+  spaces' tables (their id / hash / vector lists and strings) pass `SEARCH_CACHE_MIB`, the least recently used
+  spaces that no search is reading at that moment are dropped and their vectors leave the pool unless another
+  space still uses them (a dropped space is read again on its next search, with the same result). A space being
+  read is never dropped under its search; one replaced or wiped while read stays counted until that search ends.
+  So the total can stand above the budget only while every kept space is being read, and returns under it
+  when those searches end.
+  Every use first reads three change counters from `core_generations` (one indexed statement): `epoch`,
+  `space:<user_id>` and `vectors:<model>`. Each writer bumps them **in the same transaction** as its change:
+  `/add` (and any write through the core), a snapshot replace, every new stored vector (write time, search-time
+  backfill, `scripts/backfill_vectors.py`), and `scripts/wipe.py`, which bumps every counter and `epoch` (it never
+  clears them: they only grow). So a wipe, a re-write of the same ids after a wipe, or a backfill run while the
+  service is up is seen by the next search without a restart: a wipe drops everything kept; a changed space is
+  read again; new vectors are looked up only for the records that were waiting for one. A change made around
+  these paths (editing the tables by hand) is **not** seen until the space changes again or the service restarts.
+- **Records still without a vector** — `/health` does not count them (that needs a full read of every space). Run,
+  inside the container: `python scripts/count_missing_vectors.py /data/memory.db [--by-space]` (read only: no table
+  or row is created or changed and the main database file is not written — SQLite may still create or use the WAL
+  side files `-wal` / `-shm` next to it, as any reader does; a database without the core's tables is an error,
+  never "0"). The last line is one
+  JSON object with `missing_vectors`. `scripts/backfill_vectors.py` computes them.
 - **Deployment** — `Dockerfile` runs `uvicorn app.main:app` on `$PORT` (8080).
   The service must be reachable over public HTTPS; the API key comes from the
   environment, never from a file.
@@ -114,7 +148,7 @@ host's environment page, so a variable missed on the host cannot quietly turn th
 | `RERANK_ENABLED` | `0` | not part of the measured version |
 | `STEM_ENGLISH` | `0` | not part of the measured version |
 | `NEIGHBOUR_CANDIDATES` | `1` | on in the measured version |
-| `EMBED_MAX_CONCURRENCY` | `64` | places at the embedding gate (code default 2, used by the measured serial run). A search never waits for a place: with none free it drops its meaning-based half and answers from keywords alone, silently. At 2 places, 16 / 32 simultaneous searches lost it for 94% / 93% of the questions; at 64 places, 16 / 32 / 64 simultaneous searches lost it for none (`eval/ruler/README.md`, "Concurrency of the embedding path"). It only decides whether a search is skipped, never how results are ranked |
+| `EMBED_MAX_CONCURRENCY` | `64` | places at the embedding gate (code default 2, used by the measured serial run). A search's query vector waits for a place up to `DENSE_QUERY_T`; with none free by then the search drops its meaning-based half and answers from keywords alone. (Measured before that wait existed: at 2 places, 16 / 32 simultaneous searches lost it for 94% / 93% of the questions; at 64 places, 16 / 32 / 64 simultaneous searches lost it for none — `eval/ruler/README.md`, "Concurrency of the embedding path".) It only decides whether a search is skipped, never how results are ranked |
 | `REQUIRE_REAL_API_KEY` | `1` | refuse to start without a real `API_KEY` |
 | `DB_PATH` / `PORT` | `/data/memory.db` / `8080` | |
 
@@ -146,7 +180,13 @@ python scripts/deploy_check.py --base https://<the deployed address>
 It does two things and exits 0 only if both pass: (1) `GET /health` must report the running configuration
 (`config.recall_paths` contains `dense`, `embed_provider` is `dashscope`, `rerank_enabled` and `stem_english`
 are `false`, `embed_max_concurrency` is `64` — the acceptance value, read back from the running core, so a host
-variable that put the gate back to the default 2 fails the check); (2) it writes four memories under a throw-away user and asks a question that shares no content
+variable that put the gate back to the default 2 fails the check). It also prints, without judging them (the
+number of CPUs differs between hosts), the in-memory dense index's settings as they took effect, which `/health`
+reports under `config`: `search_heavy_concurrency` (the resolved number of slots — `0` in the settings shows here as
+the CPUs the process may use; on a host without the cgroup v2 `cpu.max` file that is the CPU count the process sees,
+which can be the host's, so set `SEARCH_HEAVY_CONCURRENCY` there), `search_heavy_wait_s`, `dense_query_t`,
+`search_cache_mib` and `numpy_threads` (the three thread variables as the process has them; `"1"` unless the host
+set them); (2) it writes four memories under a throw-away user and asks a question that shares no content
 word with the memory it needs — keywords find nothing, so the memory can only come back through the
 meaning-based path. The key is read from the environment only and never printed. A request that cannot be made or
 read ends as `FAIL` with a reason code (`network_unreachable`, `timeout`, `tls_error`, `not_json`), never a traceback;

@@ -15,12 +15,13 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 
 from core import Core, CoreConfig, Record
 from core.db import Database, StoreBusy
+from core.dense_index import effective_cpus
 
 from .auth import make_require_api_key
 from .config import Settings, load
@@ -173,6 +174,10 @@ def make_app(settings: Settings) -> FastAPI:
             embed_acquire_s=settings.embed_acquire_s,
             dense_backfill_m=settings.dense_backfill_m,
             dense_backfill_t=settings.dense_backfill_t,
+            dense_query_t=settings.dense_query_t,
+            search_heavy_concurrency=settings.search_heavy_concurrency,
+            search_heavy_wait_s=settings.search_heavy_wait_s,
+            search_cache_bytes=settings.search_cache_mib * 2 ** 20,
             stem_english=settings.stem_english,
         ))
         app.state.core = core
@@ -202,21 +207,24 @@ def make_app(settings: Settings) -> FastAPI:
         # app was created without a lifespan) we still answer 200 with the
         # minimum contract.
         core = getattr(app.state, "core", None)
-        pending = 0
-        if core is not None and getattr(core, "config", None) and "dense" in core.config.paths:
-            # Sum across all spaces. A database failure here must propagate
-            # (an HTTP 500), never masquerade as "no gaps".
-            with core.db.connect() as conn:
-                spaces = conn.execute(
-                    "SELECT DISTINCT space_id FROM core_records"
-                ).fetchall()
-                for (sid,) in spaces:
-                    pending += core.pending_vectors(sid)
+        if core is not None and getattr(core, "db", None) is not None:
+            # A fixed amount of work, however big the database: one probe per table a search needs. A missing
+            # or unreadable table raises here (an HTTP 500), never an "ok". The exact number of records still
+            # without a vector is not here (it needs a full read): scripts/count_missing_vectors.py gives it.
+            needed = ["core_records", "core_fts"]
+            if "dense" in core.config.paths:
+                needed += ["core_vectors", "core_generations"]
+            conn = core.db.connect()
+            try:
+                for table in needed:
+                    conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchall()
+            finally:
+                conn.close()
         # The configuration the service is RUNNING with (the core's own, not a re-read of the environment),
         # names and switches only — no key, no address. A read-back after a deployment uses this to prove
         # the meaning-based path is on.
         running = core.config if core is not None else None
-        return {"ok": True, "pending_vectors": pending, "build": _read_build(),
+        return {"ok": True, "build": _read_build(),
                 "config": {
                     "recall_paths": list(running.paths) if running is not None else list(settings.recall_paths),
                     "embed_provider": settings.embed_provider,
@@ -225,7 +233,31 @@ def make_app(settings: Settings) -> FastAPI:
                     "neighbour_candidates": settings.neighbour_candidates,
                     "dashscope_dim": settings.dashscope_dim,
                     "embed_max_concurrency": (running.embed_max_concurrency if running is not None
-                                              else settings.embed_max_concurrency)}}
+                                              else settings.embed_max_concurrency),
+                    # The dense index's settings as they took effect (read back after a deployment; they are not
+                    # checked against a fixed value — the number of CPUs differs between hosts).
+                    **_dense_index_effective(core, running)}}
+
+    def _dense_index_effective(core, running):
+        """search_heavy_concurrency is the RESOLVED number of slots (0 in the settings means "the CPUs this process may
+        use"), read from the running index when the dense path is on; the numpy thread variables are the values this
+        process has (set by the service package before numpy loaded, unless the environment set them)."""
+        index = next((getattr(rc, "index", None) for rc in (core.recalls if core is not None else ())
+                      if getattr(rc, "name", None) == "dense"), None)
+        if index is not None:
+            slots = index.heavy_concurrency
+        else:
+            asked = running.search_heavy_concurrency if running is not None else settings.search_heavy_concurrency
+            slots = asked if asked else effective_cpus()
+        return {
+            "search_heavy_concurrency": slots,
+            "search_heavy_wait_s": running.search_heavy_wait_s if running is not None else settings.search_heavy_wait_s,
+            "dense_query_t": running.dense_query_t if running is not None else settings.dense_query_t,
+            "search_cache_mib": (running.search_cache_bytes // 2 ** 20 if running is not None
+                                 else settings.search_cache_mib),
+            "numpy_threads": {name: os.environ.get(name)
+                              for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")},
+        }
 
     def _render(ts, speaker, text):
         """The contract's rendering of one message.
@@ -280,7 +312,7 @@ def make_app(settings: Settings) -> FastAPI:
                            session_id=req.session_id)
 
     @app.post("/search", response_model=SearchResponse)
-    def search(req: SearchRequest, request: Request, response: Response,
+    def search(req: SearchRequest, request: Request,
                _=Depends(_require_auth)):
         state = request.app.state
         # Since 2026-10-29: a blank query or a top_k below 1 is answered, not refused: 200 with no results
@@ -293,11 +325,6 @@ def make_app(settings: Settings) -> FastAPI:
                                      context_before=context, context_after=context)
         except StoreBusy:
             raise HTTPException(status_code=503, detail="storage busy, retry")
-        # Attach the pending-vectors count for this space as a response header.
-        if state.core is not None and "dense" in state.core.config.paths:
-            pending = state.core.pending_vectors(req.user_id)
-            if pending > 0:
-                response.headers["X-Core-Pending-Vectors"] = str(pending)
         out = []
         seen = set()
         seen_records = set()

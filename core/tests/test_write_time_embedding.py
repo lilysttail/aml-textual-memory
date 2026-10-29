@@ -140,7 +140,7 @@ def _build_core(db_dir, paths=("keyword", "dense"), embedder=None,
                 embed_backfill_wait_s=60.0, embed_acquire_s=30.0,
                 dense_exclude_lines=("terminal",),
                 embed_max_concurrency=2, embed_batch=32,
-                dense_backfill_m=8, dense_backfill_t=2.0):
+                dense_backfill_m=8, dense_backfill_t=2.0, dense_query_t=None):
     """Build a Core with a temp DB and optional embedder."""
     d = os.path.join(db_dir, "core.db")
     cfg = CoreConfig(
@@ -154,6 +154,7 @@ def _build_core(db_dir, paths=("keyword", "dense"), embedder=None,
         dense_exclude_lines=dense_exclude_lines,
         dense_backfill_m=dense_backfill_m,
         dense_backfill_t=dense_backfill_t,
+        **({} if dense_query_t is None else {"dense_query_t": dense_query_t}),
         context_before=1,
         context_after=1,
     )
@@ -390,11 +391,16 @@ def test_v5_search_doesnt_compute_full_corpus():
 
 
 # ---------------------------------------------------------------------------
-# V6: Missing vectors visible (health + header + log)
+# V6: Missing vectors visible (the read-only count script + log)
 # ---------------------------------------------------------------------------
 
-def test_v6_missing_vectors_visible_in_health():
-    """After a failed write, /health should report pending_vectors > 0."""
+def test_v6_missing_vectors_visible_in_the_count_script():
+    """After a failed write, the read-only count script reports missing_vectors > 0 (and the data agrees).
+
+    /health no longer carries this number (it would need a full read of every space); the exact count is
+    scripts/count_missing_vectors.py, run by hand."""
+    import subprocess
+    import sys
     d = _tmpdir()
     emb = FailingEmbedder(dim=16, fail_from_call=0)
     core, db_path = _build_core(d, paths=("keyword", "dense"), embedder=emb)
@@ -402,11 +408,16 @@ def test_v6_missing_vectors_visible_in_health():
     recs = [_record("r1", "hello world")]
     core.write(recs, space_id="sp1", batch_id="b1")
 
-    # Check via database (the health endpoint would check this)
     conn = _get_db_conn(db_path)
     missing = _get_missing_vectors(conn, "sp1", emb.model_name)
     conn.close()
     assert len(missing) == 1, f"expected 1 missing vector, got {len(missing)}"
+
+    script = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "count_missing_vectors.py")
+    r = subprocess.run([sys.executable, script, db_path, "--model", emb.model_name],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-400:]
+    assert json.loads(r.stdout.strip().splitlines()[-1])["missing_vectors"] == 1, r.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +479,8 @@ def test_v7_write_fail_open_search_fail_fast():
 # ---------------------------------------------------------------------------
 
 def test_deadline_gate_full_gives_up_immediately():
-    """闸满：搜索补算抢不到闸立即放弃，不等 30 秒，keyword 照答。
+    """闸满：query 向量最多在自己的期限里等闸位（这里 0.3 秒），等不到就跳过 dense；
+    不等 30 秒的 acquire timeout，keyword 照答。
 
     证据式断言：搜索耗时 < 1 秒（远小于闸的 30s acquire timeout），
     不抛异常，keyword 有结果。
@@ -477,7 +489,7 @@ def test_deadline_gate_full_gives_up_immediately():
     emb = SpyEmbedder(dim=16)
     core, db_path = _build_core(d, paths=("keyword", "dense"), embedder=emb,
                                  embed_max_concurrency=1,
-                                 dense_backfill_m=8, dense_backfill_t=2.0)
+                                 dense_backfill_m=8, dense_backfill_t=2.0, dense_query_t=0.3)
     core.write([_record("r1", "hello world")], space_id="sp1", batch_id="b1")
     # 清向量制造缺口：搜索时必须补算才能有 dense 候选。
     conn = _get_db_conn(db_path)
@@ -533,7 +545,7 @@ def test_deadline_same_hash_in_flight_gives_up():
     d = _tmpdir()
     emb = SlowEmbedder(dim=16, delay_s=1.0)
     core, db_path = _build_core(d, paths=("keyword", "dense"), embedder=emb,
-                                 dense_backfill_m=8, dense_backfill_t=0.1)
+                                 dense_backfill_m=8, dense_backfill_t=0.1, dense_query_t=0.1)
     core.write([_record("r1", "hello world")], space_id="sp1", batch_id="b1")
     conn = _get_db_conn(db_path)
     conn.execute("DELETE FROM core_vectors")
@@ -554,7 +566,8 @@ def test_deadline_same_hash_in_flight_gives_up():
     time.sleep(0.2)  # 让 A 的 flight 建立、闸被占。
     try:
         start = time.monotonic()
-        hits = core.search("hello", space_id="sp1", top_k=5)
+        # query 跟 A 在算的是同一段：query 向量等 A 的 flight，到自己的期限放弃。
+        hits = core.search("hello world", space_id="sp1", top_k=5)
         elapsed = time.monotonic() - start
     finally:
         a_done.wait(5)
@@ -572,7 +585,7 @@ def test_deadline_single_slow_call_gives_up_at_timeout():
     d = _tmpdir()
     emb = SlowEmbedder(dim=16, delay_s=1.0)
     core, db_path = _build_core(d, paths=("keyword", "dense"), embedder=emb,
-                                 dense_backfill_m=8, dense_backfill_t=0.2)
+                                 dense_backfill_m=8, dense_backfill_t=0.2, dense_query_t=0.2)
     # 写入时算向量：无 deadline → 用配置超时（timeout_s=None）→ 睡 1s 完成。
     core.write([_record("r1", "hello world")], space_id="sp1", batch_id="b1")
     conn = _get_db_conn(db_path)
@@ -585,8 +598,8 @@ def test_deadline_single_slow_call_gives_up_at_timeout():
     elapsed = time.monotonic() - start
 
     assert hits is not None and len(hits) > 0, "keyword 必须照答"
-    # 补算那次调用睡到 timeout_s=剩余时间（约 0.2s）才放弃；query 的剩余
-    # 时间已耗尽，立即失败。总耗时应在时限附近。
+    # query 向量先算：它那次调用睡到自己的期限（0.2s）放弃，dense 跳过、不再补算。
+    # 总耗时应在时限附近。
     assert 0.12 <= elapsed < 0.6, \
         f"单次慢调用应到点（约 {elapsed:.2f}s 应在 0.12-0.6s 内）放弃"
 
@@ -599,7 +612,7 @@ def test_deadline_query_vector_single_call_gives_up():
     d = _tmpdir()
     emb = SlowEmbedder(dim=16, delay_s=1.0)
     core, db_path = _build_core(d, paths=("keyword", "dense"), embedder=emb,
-                                 dense_backfill_m=8, dense_backfill_t=0.2)
+                                 dense_backfill_m=8, dense_backfill_t=0.2, dense_query_t=0.2)
     # 写入时算好向量，搜索时没有缺口 → 只有 query 向量要算。
     core.write([_record("r1", "hello world")], space_id="sp1", batch_id="b1")
 

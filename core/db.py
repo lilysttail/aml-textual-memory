@@ -59,7 +59,31 @@ TABLES = {
                      retry_count INTEGER NOT NULL DEFAULT 0,
                      last_attempt_at TEXT,
                      PRIMARY KEY (space_id, record_id))""", True),
+    # Change counters ("generations") that let a reader keep a copy of the data in memory and tell, with one
+    # indexed read, whether it is still current. Every change to a space's records bumps "space:<space_id>",
+    # every new vector bumps "vectors:<model>", in the same transaction as the change; a wipe bumps every row
+    # and "epoch". Not evaluation data (is_data=False): a wipe must never clear it, or the counters would go back
+    # to values a reader has already seen. Numbers only grow.
+    "core_generations": ("""CREATE TABLE IF NOT EXISTS core_generations(
+                     key TEXT PRIMARY KEY, gen INTEGER NOT NULL)""", False),
 }
+
+GENERATIONS = "core_generations"
+EPOCH_KEY = "epoch"
+
+
+def space_generation_key(space_id: str) -> str:
+    return f"space:{space_id}"
+
+
+def vectors_generation_key(model: str) -> str:
+    return f"vectors:{model}"
+
+
+def bump_generation(conn, key: str) -> None:
+    """Bump one change counter inside the caller's transaction (a missing row starts at 1)."""
+    conn.execute(f"INSERT INTO {GENERATIONS}(key, gen) VALUES (?, 1) "
+                 f"ON CONFLICT(key) DO UPDATE SET gen = gen + 1", (key,))
 
 _INDEX_DDL = [
     # 取邻居按这个走。
@@ -187,6 +211,11 @@ class Database:
                         continue
                     conn.execute(f"DELETE FROM {name}")
                     cleared.append(name)
+                # Readers that keep data in memory must see the wipe: every counter goes up (never back to a
+                # value they have seen), "epoch" included, in the wipe's own transaction.
+                if table_exists(conn, GENERATIONS):
+                    conn.execute(f"UPDATE {GENERATIONS} SET gen = gen + 1")
+                    conn.execute(f"INSERT OR IGNORE INTO {GENERATIONS}(key, gen) VALUES (?, 1)", (EPOCH_KEY,))
                 conn.commit()
             except sqlite3.OperationalError as e:
                 conn.rollback()

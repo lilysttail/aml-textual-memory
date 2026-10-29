@@ -20,7 +20,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
-from .db import StoreBusy, is_locked
+from .db import StoreBusy, bump_generation, is_locked, space_generation_key
 from .models import Record
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
@@ -211,8 +211,10 @@ class Store:
         own transaction.
         """
         records = list(records)
-        if not records:
+        if not records and batch_id is None:
             return {"written": 0, "replay": False}
+        # A batch with no records still claims its batch id (in the transaction below), so the same id sent
+        # again — with or without records — is a replay of that one write, not a new write.
         records = self._in_event_order(records)
         if conn is not None:
             return self._write_records(conn, records, space_id, batch_id)
@@ -243,6 +245,8 @@ class Store:
         for r in records:
             if self._insert(conn, r, space_id, batch_id):
                 written += 1
+        if written:
+            bump_generation(conn, space_generation_key(space_id))   # same transaction as the rows
         return {"written": written, "replay": False}
 
     def replace_snapshot(self, space_id: str, records, snapshot_id=None):
@@ -270,6 +274,8 @@ class Store:
                 conn.execute("DELETE FROM core_fts WHERE space_id=?", (space_id,))
                 conn.execute("DELETE FROM core_records WHERE space_id=?", (space_id,))
                 conn.execute("DELETE FROM core_sessions WHERE space_id=?", (space_id,))
+                # why-no-vector notes of the old rows: they explained texts that are gone with them
+                conn.execute("DELETE FROM core_pending_vectors WHERE space_id=?", (space_id,))
                 written = 0
                 for r in records:
                     if self._insert(conn, r, space_id, None):
@@ -279,6 +285,7 @@ class Store:
                     "VALUES (?,?,?)",
                     (space_id, snapshot_id or "",
                      datetime.now(timezone.utc).isoformat()))
+                bump_generation(conn, space_generation_key(space_id))
                 conn.commit()
                 return {"written": written}
             except sqlite3.OperationalError as e:
@@ -421,12 +428,14 @@ class Store:
         out.sort(key=lambda r: r[1], reverse=True)
         return out[:limit]
 
-    def get_rows(self, space_id, record_ids):
-        """{record_id: row dict} for the given ids (one space only)."""
+    def get_rows(self, space_id, record_ids, conn=None):
+        """{record_id: row dict} for the given ids (one space only). conn: use the caller's connection."""
         ids = list(record_ids)
         if not ids:
             return {}
-        conn = self._db.connect()
+        own = conn is None
+        if own:
+            conn = self._db.connect()
         try:
             out = {}
             for i in range(0, len(ids), 500):
@@ -445,22 +454,26 @@ class Store:
                 raise StoreBusy(str(e)) from e
             raise
         finally:
-            conn.close()
+            if own:
+                conn.close()
 
     def get_record(self, space_id: str, record_id: str):
         rows = self.get_rows(space_id, [record_id])
         row = rows.get(record_id)
         return Record.from_row(row) if row else None
 
-    def iter_records(self, space_id: str, exclude_lines=()):
-        """[(record_id, text)] over one space (dense full mode).
+    def iter_records(self, space_id: str, exclude_lines=(), conn=None):
+        """[(record_id, text)] over one space: the records that should have a vector.
 
         exclude_lines: those `line` values are skipped — a line that must not
         reach the vector route (e.g. terminal lines) still reaches the keyword
         index, it is only left out of the vectors.
+        conn: read over the caller's connection (and its snapshot).
         """
         excl = [l for l in (exclude_lines or ()) if l]
-        conn = self._db.connect()
+        own = conn is None
+        if own:
+            conn = self._db.connect()
         try:
             if excl:
                 ph = ",".join("?" * len(excl))
@@ -476,7 +489,8 @@ class Store:
                 raise StoreBusy(str(e)) from e
             raise
         finally:
-            conn.close()
+            if own:
+                conn.close()
 
     def count(self, space_id: str) -> int:
         conn = self._db.connect()
@@ -491,7 +505,7 @@ class Store:
             conn.close()
 
     def neighbors(self, space_id: str, session_id: str, turn_index,
-                  before: int = 0, after: int = 0):
+                  before: int = 0, after: int = 0, conn=None):
         """The current-valid neighbours of one record.
 
         Neighbours come from the CURRENT valid set in window order — a deleted
@@ -502,7 +516,9 @@ class Store:
         before_rows, after_rows = [], []
         if turn_index is None:
             return before_rows, after_rows
-        conn = self._db.connect()
+        own = conn is None              # conn: the caller's connection (one per search, not one per hit)
+        if own:
+            conn = self._db.connect()
         try:
             cols = ("space_id, record_id, session_id, turn_index, speaker, direction, "
                     "line, ts, created_at, text, sec_flag, valid, state, meta")
@@ -524,7 +540,8 @@ class Store:
                 raise StoreBusy(str(e)) from e
             raise
         finally:
-            conn.close()
+            if own:
+                conn.close()
         return before_rows, after_rows
 
     def session_records(self, space_id: str, session_id: str):

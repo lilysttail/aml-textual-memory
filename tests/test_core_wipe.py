@@ -24,8 +24,9 @@ from core.db import TABLES as CORE_TABLES
 from scripts.wipe import RETIRED_TABLES
 
 # The core's tables that a wipe leaves alone because they are not evaluation data: the record of which write
-# settings the data was written under (core/write_settings.py checks it at start-up only).
-KEPT_BY_A_WIPE = {"core_write_settings"}
+# settings the data was written under (core/write_settings.py checks it at start-up only), and the change
+# counters (core_generations) — a wipe bumps them, it never clears them (they must only grow).
+KEPT_BY_A_WIPE = {"core_write_settings", "core_generations"}
 
 # One row for every table of the core's registry. The list of tables comes
 # from the registry (core.db.TABLES); this dict only says how to fill one.
@@ -45,6 +46,7 @@ CORE_ROWS = {
                            " VALUES ('k','v')",
     "core_pending_vectors": "INSERT INTO core_pending_vectors(space_id, record_id, content_hash, reason, retry_count, last_attempt_at)"
                             " VALUES ('sp','r','h','timeout',1,'t')",
+    "core_generations": "INSERT INTO core_generations(key, gen) VALUES ('space:sp', 3)",
 }
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -130,7 +132,10 @@ def test_wipe_clears_the_core_tables():
     try:
         for name in CORE_TABLES:
             n = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
-            if name in KEPT_BY_A_WIPE:
+            if name == "core_generations":
+                gens = dict(conn.execute("SELECT key, gen FROM core_generations").fetchall())
+                assert gens.get("space:sp") == 4 and gens.get("epoch", 0) >= 1,                     f"a wipe must bump every counter and the epoch, never clear them: {gens}"
+            elif name in KEPT_BY_A_WIPE:
                 assert n == 1, f"{name} is not evaluation data: a wipe must leave it alone ({n} rows)"
             else:
                 assert n == 0, f"{name} still has {n} rows"
@@ -142,10 +147,11 @@ def test_wipe_clears_the_core_tables():
 
 
 def test_the_registry_and_the_wipe_agree_on_what_is_evaluation_data():
-    """The wipe clears exactly the registry's evaluation-data tables — and the one table that is not evaluation data
-    (the record of the write settings) is named here, so moving it back into the data set is a visible change."""
+    """The wipe clears exactly the registry's evaluation-data tables — and the tables that are not evaluation data
+    (the record of the write settings, the change counters) are named here, so moving one into the data set is a
+    visible change."""
     from core.db import business_tables
-    assert KEPT_BY_A_WIPE == {"core_write_settings"}
+    assert KEPT_BY_A_WIPE == {"core_write_settings", "core_generations"}
     assert set(business_tables()) == set(CORE_TABLES) - KEPT_BY_A_WIPE
 
 

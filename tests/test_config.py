@@ -55,3 +55,22 @@ def test_negative_backfill_limits_rejected():
         _base(dense_backfill_m=-1).validate()
     with pytest.raises(ValueError, match="DENSE_BACKFILL_T"):
         _base(dense_backfill_t=-0.5).validate()
+
+@pytest.mark.parametrize("field,value,name", [
+    ("dense_query_t", 0, "DENSE_QUERY_T"),
+    ("search_heavy_concurrency", -1, "SEARCH_HEAVY_CONCURRENCY"),
+    ("search_heavy_wait_s", 0, "SEARCH_HEAVY_WAIT_S"),
+    ("search_cache_mib", 0, "SEARCH_CACHE_MIB"),
+])
+def test_dense_index_settings_out_of_range_are_rejected(field, value, name):
+    with pytest.raises(ValueError, match=name):
+        _base(**{field: value}).validate()
+
+
+def test_dense_index_settings_are_read_from_the_environment(monkeypatch):
+    from app.config import load
+    for k, v in {"SEARCH_HEAVY_CONCURRENCY": "3", "SEARCH_HEAVY_WAIT_S": "7.5", "SEARCH_CACHE_MIB": "300",
+                 "DENSE_QUERY_T": "1.5"}.items():
+        monkeypatch.setenv(k, v)
+    s = load()
+    assert (s.search_heavy_concurrency, s.search_heavy_wait_s, s.search_cache_mib, s.dense_query_t) == (3, 7.5, 300, 1.5)

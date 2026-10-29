@@ -200,10 +200,28 @@ def null_embedder(monkeypatch):
 def test_health_reports_the_running_configuration(null_embedder):
     with TestClient(app_main.make_app(_settings())) as client:
         body = client.get("/health").json()
-    assert body["ok"] is True and isinstance(body["pending_vectors"], int)
+    assert body["ok"] is True and "pending_vectors" not in body
+    # The dense index's settings are read back as they took effect: the number of slots is the resolved one
+    # (setting 0 = the CPUs this process may use, so the expected value is computed, not written down), the numpy
+    # thread variables are the process's own values.
+    from core.dense_index import effective_cpus
     assert body["config"] == {
         "recall_paths": ["keyword", "dense"], "embed_provider": "dashscope", "rerank_enabled": False,
-        "stem_english": False, "neighbour_candidates": True, "dashscope_dim": 1024, "embed_max_concurrency": 2}
+        "stem_english": False, "neighbour_candidates": True, "dashscope_dim": 1024, "embed_max_concurrency": 2,
+        "search_heavy_concurrency": effective_cpus(), "search_heavy_wait_s": 15.0, "dense_query_t": 3.0,
+        "search_cache_mib": 640,
+        "numpy_threads": {k: os.environ.get(k) for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")}}
+    assert body["config"]["search_heavy_concurrency"] >= 1, "the read-back shows the resolved number, never 0"
+
+
+def test_health_reads_back_the_dense_index_settings_that_took_effect(null_embedder):
+    """Values set on the platform show up in the read-back as the running index has them."""
+    with TestClient(app_main.make_app(_settings(search_heavy_concurrency=5, search_heavy_wait_s=9.5, dense_query_t=1.25,
+                                                search_cache_mib=200))) as client:
+        cfg = client.get("/health").json()["config"]
+        assert (cfg["search_heavy_concurrency"], cfg["search_heavy_wait_s"], cfg["dense_query_t"],
+                cfg["search_cache_mib"]) == (5, 9.5, 1.25, 200)
+        assert client.app.state.core.recalls[1].index.heavy_concurrency == 5
 
 
 def test_health_reports_the_gate_places_the_core_really_runs_with(null_embedder):
@@ -239,3 +257,12 @@ def test_health_never_shows_a_key_or_an_address(null_embedder):
         text = client.get("/health").text
     for secret in (FAKE_API_KEY, FAKE_DASHSCOPE_KEY, "dashscope-intl", "http"):
         assert secret not in text, f"/health leaked {secret!r}"
+
+
+def test_health_reads_back_the_numpy_thread_variables_the_process_has(null_embedder, monkeypatch):
+    """A thread variable the host set (not the service's default "1") is what /health reports."""
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "3")
+    monkeypatch.setenv("MKL_NUM_THREADS", "2")
+    with TestClient(app_main.make_app(_settings())) as client:
+        threads = client.get("/health").json()["config"]["numpy_threads"]
+    assert threads["OPENBLAS_NUM_THREADS"] == "3" and threads["MKL_NUM_THREADS"] == "2", threads

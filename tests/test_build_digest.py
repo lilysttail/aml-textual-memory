@@ -60,4 +60,5 @@ def test_the_default_path_is_next_to_the_app_directory_where_the_image_stores_it
 
 def test_the_rest_of_health_is_unchanged(monkeypatch, tmp_path):
     body, _ = _health(monkeypatch, tmp_path, "0123456789ab")
-    assert set(body) == {"ok", "pending_vectors", "config", "build"}
+    # pending_vectors left /health (it needed a full read of every space): scripts/count_missing_vectors.py has it
+    assert set(body) == {"ok", "config", "build"}

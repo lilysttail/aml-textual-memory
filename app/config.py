@@ -106,6 +106,14 @@ class Settings:
     # Search-path backfill limits.
     dense_backfill_m: int = 8
     dense_backfill_t: float = 2.0
+    # The query vector's own deadline (seconds; waiting for the embedding gate included).
+    dense_query_t: float = 3.0
+    # The in-memory dense index (core/dense_index.py): how many builds / similarity passes run at once
+    # (0 = the CPUs this process may use, from the container's quota), how long a search waits for a slot
+    # before it answers 503, and the memory budget of the shared vector pool + the spaces' indexes.
+    search_heavy_concurrency: int = 0
+    search_heavy_wait_s: float = 15.0
+    search_cache_mib: int = 640
     # English stemming for the built-in keyword tokenizer. OFF by
     # default; whether the competition turns it on is decided by the answer
     # ruler, not by this code. Changing it changes the index format — an
@@ -141,6 +149,14 @@ class Settings:
             raise ValueError("DENSE_BACKFILL_M must be >= 0")
         if self.dense_backfill_t < 0:
             raise ValueError("DENSE_BACKFILL_T must be >= 0")
+        if not self.dense_query_t > 0:
+            raise ValueError("DENSE_QUERY_T must be > 0")
+        if self.search_heavy_concurrency < 0:
+            raise ValueError("SEARCH_HEAVY_CONCURRENCY must be >= 0 (0 = the CPUs available)")
+        if not self.search_heavy_wait_s > 0:
+            raise ValueError("SEARCH_HEAVY_WAIT_S must be > 0")
+        if self.search_cache_mib < 1:
+            raise ValueError("SEARCH_CACHE_MIB must be >= 1")
         if self.rerank_n < 1:
             raise ValueError("RERANK_N must be >= 1")
         if self.embed_provider not in ("local", "dashscope"):
@@ -196,6 +212,10 @@ def load() -> Settings:
         stem_english=_bool("STEM_ENGLISH", False),
         dense_backfill_m=_int("DENSE_BACKFILL_M", 8),
         dense_backfill_t=_float("DENSE_BACKFILL_T", 2.0),
+        dense_query_t=_float("DENSE_QUERY_T", 3.0),
+        search_heavy_concurrency=_int("SEARCH_HEAVY_CONCURRENCY", 0),
+        search_heavy_wait_s=_float("SEARCH_HEAVY_WAIT_S", 15.0),
+        search_cache_mib=_int("SEARCH_CACHE_MIB", 640),
         require_real_api_key=_bool("REQUIRE_REAL_API_KEY", False),
     )
     return s.validate()

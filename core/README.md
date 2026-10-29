@@ -76,7 +76,13 @@ core_spaces(space_id PRIMARY KEY, snapshot_id, updated_at)
 core_write_settings(name PRIMARY KEY, value)   -- write-time settings (tokenizer / write-format version); a wipe leaves it
 core_pending_vectors(space_id, record_id, content_hash, reason, retry_count, last_attempt_at,
                      PRIMARY KEY(space_id, record_id))   -- why a vector was not computed at write time (explains, does not decide)
+core_generations(key PRIMARY KEY, gen)   -- change counters: "epoch", "space:<id>", "vectors:<model>"; only grow; a wipe bumps them
 ```
+
+Every writer bumps the matching counter in the same transaction as its change (record writes and `write_in_tx`,
+`replace_space_snapshot`, every new stored vector, `Database.wipe`, which bumps every counter and `epoch`). The
+in-memory dense index (`core/dense_index.py`) reads the three counters of a space with one indexed statement before
+each use and rebuilds what they say has changed; see `OPERATIONS.md`, "The in-memory dense index".
 
 The FTS `body` holds the **tokenized word sequence** (writing and querying use the same tokenizer). Without a plugged-in
 tokenizer, the built-in English tokenizer treats a whole run of Chinese text as one word (the whole run matches, a substring
@@ -95,6 +101,11 @@ does not); a Chinese tokenizer is a plug-in, and plugging one in changes the ind
 | `tokenizer` | None | tokenizer plug (for Chinese, say) |
 | `tokenizer_key` | None | the tokenizer's version id (such as `jieba-v1`), written into `core_write_settings` |
 | `embedder` / `vector_cache` | None | vector plug (`embed(texts) -> vectors`) |
+| `dense_backfill_m` / `dense_backfill_t` | 8 / 2.0 | search-time backfill: at most M records without a vector, within T seconds after the query vector; the gate is not waited for |
+| `dense_query_t` | 3.0 | the query vector's own deadline (seconds), waiting for the embedding gate included |
+| `search_heavy_concurrency` | 0 | builds of a space's in-memory index / similarity passes at once; 0 = the CPUs the process may use |
+| `search_heavy_wait_s` | 15.0 | wait for that limit; past it the search raises `SearchBusy` (a `StoreBusy`) |
+| `search_cache_bytes` | 640 MiB | budget of the shared vector pool + the spaces' indexes (least recently used spaces leave) |
 
 ## Write-time settings: changing the tokenizer changes the vocabulary
 

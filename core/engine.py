@@ -21,6 +21,7 @@ from . import rerank as fusion
 from . import write_settings
 from .config import CoreConfig
 from .db import Database, StoreBusy, is_locked
+from .dense_index import DenseIndex, SearchBusy
 from .embedder import EmbedUnavailable
 from .models import Record, SearchHit
 from .recall import DenseRecall, KeywordRecall
@@ -83,6 +84,36 @@ def rebuild_fts_index(config: CoreConfig) -> None:
     write_settings.record(db, write_settings.current(config))
 
 
+def find_missing_vectors(store, db, model, exclude_lines, space_id, limit=0) -> list:
+    """[(record_id, content_hash, text)] of one space's records that should have a vector and have none.
+
+    The one judgment of "missing": the dense-eligible records come from Store.iter_records (valid=1, the
+    space, not an excluded line) and a record is missing when core_vectors has no row for (model, the sha256
+    of its text). Used by Core.missing_vector_records (the backfill script) and the read-only count script, so
+    the two can never disagree. A database failure propagates: it must not read as "nothing missing".
+    """
+    items = store.iter_records(space_id, exclude_lines=exclude_lines)
+    if not items:
+        return []
+    conn = db.connect()
+    try:
+        hashes = {rid: _ch(text) for rid, text in items}
+        hash_list = list(dict.fromkeys(hashes.values()))
+        existing = set()
+        for i in range(0, len(hash_list), 500):
+            chunk = hash_list[i:i + 500]
+            ph = ",".join("?" for _ in chunk)
+            for row in conn.execute(
+                    f"SELECT content_hash FROM core_vectors "
+                    f"WHERE model = ? AND content_hash IN ({ph})",
+                    [model, *chunk]):
+                existing.add(row[0])
+    finally:
+        conn.close()
+    result = [(rid, hashes[rid], text) for rid, text in items if hashes[rid] not in existing]
+    return result[:limit] if limit > 0 else result
+
+
 @dataclass
 class Candidate:
     """One candidate of a recall path (for the ruler and for debugging)."""
@@ -134,10 +165,17 @@ class Core:
             elif name == "dense":
                 if vc is None:
                     raise ValueError("the dense path needs an embedder (or a vector_cache)")
+                index = DenseIndex(db, store, vc._vec, model_key(vc._emb.model_name),
+                                   exclude_lines=config.dense_exclude_lines,
+                                   heavy_concurrency=config.search_heavy_concurrency,
+                                   heavy_wait_s=config.search_heavy_wait_s,
+                                   budget_bytes=config.search_cache_bytes)
                 recalls.append(DenseRecall(store, vc,
                                            exclude_lines=config.dense_exclude_lines,
                                            backfill_m=config.dense_backfill_m,
-                                           backfill_t=config.dense_backfill_t))
+                                           backfill_t=config.dense_backfill_t,
+                                           query_t=config.dense_query_t,
+                                           index=index))
             else:
                 raise ValueError(f"unknown recall path {name!r} (known: keyword, dense)")
         return cls(store, config, recalls, vc, db=db)
@@ -258,54 +296,16 @@ class Core:
                 (space_id, record_id))
             conn.commit()
 
-    def pending_vectors(self, space_id: str) -> int:
-        """Count records that are missing vectors (fact-based, not from pending table).
-
-        A record is missing a vector when:
-          - it is in core_records with valid=1
-          - its content_hash is NOT in core_vectors for the current model
-          - its line is NOT in dense_exclude_lines
-        """
-        records = self.missing_vector_records(space_id, limit=0)
-        return len(records)
-
     def missing_vector_records(self, space_id: str, limit=0) -> list:
-        """Get records that are missing vectors (for backfill).
+        """Records of one space that have no vector for the current model (for the offline backfill / count
+        scripts — a full read of the space, never on the search or /health path).
 
-        Returns [(record_id, content_hash, text), ...] for dense-eligible
-        records that don't have a vector in core_vectors.
-
-        The dense-eligibility SQL lives in exactly one place: Store.iter_records
-        (valid=1, space, exclude_lines). This method reuses it and computes the
-        records-vectors gap in Python, so health / backfill / search can never
-        drift into a second SQL copy of "which records should have vectors".
-        A database failure here propagates: it must not be reported as
-        "no gaps".
+        Returns [(record_id, content_hash, text), ...]. See find_missing_vectors.
         """
         if self._vc is None:
             return []
-        model = model_key(self._vc._emb.model_name)
-        exclude = self._config.dense_exclude_lines
-        items = self._store.iter_records(space_id, exclude_lines=exclude)
-        if not items:
-            return []
-        with self._db.connect() as conn:
-            hashes = {rid: _ch(text) for rid, text in items}
-            hash_list = list(hashes.values())
-            existing = set()
-            for i in range(0, len(hash_list), 500):
-                chunk = hash_list[i:i + 500]
-                ph = ",".join("?" for _ in chunk)
-                for row in conn.execute(
-                    f"SELECT content_hash FROM core_vectors "
-                    f"WHERE model = ? AND content_hash IN ({ph})",
-                    [model, *chunk]):
-                    existing.add(row[0])
-            result = [(rid, hashes[rid], text) for rid, text in items
-                      if hashes[rid] not in existing]
-            if limit > 0:
-                result = result[:limit]
-            return result
+        return find_missing_vectors(self._store, self._db, model_key(self._vc._emb.model_name),
+                                    self._config.dense_exclude_lines, space_id, limit=limit)
 
     def write_in_tx(self, conn, records, space_id: str, batch_id=None):
         """Write inside a transaction the caller owns (the shell writes its own
@@ -330,6 +330,9 @@ class Core:
 
         No fusion, no rerank, no top_k cut, no neighbours: just what each path
         found and how it scored it.
+
+        Raises SearchBusy (a StoreBusy) when the dense path could not get a slot for its heavy part within the
+        wait limit, and StoreBusy when the database stayed locked; a provider that is down only drops its path.
         """
         out = []
         for rc in self._recalls:
@@ -367,6 +370,10 @@ class Core:
                 continue
             try:
                 got = rc.candidates(space_id, query, (), over)
+            except SearchBusy:
+                # No slot for the heavy part within the wait limit: the whole search answers "busy, retry"
+                # (503) instead of quietly losing its dense half.
+                raise
             except (EmbedUnavailable, StoreBusy) as e:
                 # The provider behind this path is down (timeout / HTTP error /
                 # bad reply / gate full). The scheme promises this path is
@@ -392,28 +399,32 @@ class Core:
         """Turn ranked ids into hits with their rows and their neighbours."""
         ordered = list(ordered)
         ids = [i for i, _ in ordered]
-        rows = self._store.get_rows(space_id, ids)
         score_of = dict(ordered)
         hits = []
-        for rid in ids:
-            row = rows.get(rid)
-            if not row:
-                continue
-            rec = Record.from_row(row)
-            before, after = ([], [])
-            if context_before or context_after:
-                before, after = self._store.neighbors(
-                    space_id, rec.session_id, rec.turn_index,
-                    before=context_before, after=context_after)
-            hits.append(SearchHit(
-                record_id=rec.record_id, space_id=space_id,
-                session_id=rec.session_id, text=rec.text,
-                score=float(score_of.get(rid, 0.0)),
-                turn_index=rec.turn_index, speaker=rec.speaker,
-                direction=rec.direction, line=rec.line, ts=rec.ts,
-                created_at=rec.created_at,
-                path_scores=dict((path_scores or {}).get(rid, {})),
-                neighbors_before=before, neighbors_after=after))
+        conn = self._db.connect()           # one connection for the rows and every hit's neighbours
+        try:
+            rows = self._store.get_rows(space_id, ids, conn=conn)
+            for rid in ids:
+                row = rows.get(rid)
+                if not row:
+                    continue
+                rec = Record.from_row(row)
+                before, after = ([], [])
+                if context_before or context_after:
+                    before, after = self._store.neighbors(
+                        space_id, rec.session_id, rec.turn_index,
+                        before=context_before, after=context_after, conn=conn)
+                hits.append(SearchHit(
+                    record_id=rec.record_id, space_id=space_id,
+                    session_id=rec.session_id, text=rec.text,
+                    score=float(score_of.get(rid, 0.0)),
+                    turn_index=rec.turn_index, speaker=rec.speaker,
+                    direction=rec.direction, line=rec.line, ts=rec.ts,
+                    created_at=rec.created_at,
+                    path_scores=dict((path_scores or {}).get(rid, {})),
+                    neighbors_before=before, neighbors_after=after))
+        finally:
+            conn.close()
         if self._config.group_by_session:
             hits = self._group_by_session(hits)
         return hits
