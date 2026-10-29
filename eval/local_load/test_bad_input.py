@@ -67,14 +67,16 @@ def main():
         payload = {
             "statuses": results,
             "server_errors_5xx": len(refused),
-            # the exact statuses: the contract says an input we cannot use is
-            # refused (4xx), and a legal long message is taken (the official
+            # the exact statuses: a request the contract cannot read (broken JSON,
+            # a required field missing) is refused (4xx); since 2026-10-29 anything the
+            # contract allows is taken (an empty message list writes nothing, a
+            # top_k below 1 answers with no results); a legal long message is taken (the official
             # contract sets no length limit — 柯 10-21 判：保持)
             "pass": len(refused) == 0
                     and results["broken_json"] == 422
                     and results["missing_fields"] == 422
-                    and results["empty_messages"] == 422
-                    and results["top_k_zero"] == 422
+                    and results["empty_messages"] == 200   # since 2026-10-29: taken, nothing written (no stricter than the contract)
+                    and results["top_k_zero"] == 200
                     and results["one_mb_content"] == 200
                     and results["wrong_key"] == 401
                     and results["health_without_key"] == 200

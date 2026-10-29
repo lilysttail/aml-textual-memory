@@ -30,9 +30,20 @@ evidence we hand over.
 | The service is a thin shell: HTTP contract, API key, field mapping, rendering, provider choice | `app/` |
 | A message without a timestamp: the event time stays empty, the rendering invents no date | `app/main.py` |
 | The content handed to the platform is the candidate itself; the neighbouring turns are candidates of their own behind a switch that is **on** in the submitted version (the ruler says it is worth 3.98 points more questions with an evidence turn, for 10.3% more characters) | `app/main.py`, `app/config.py` |
-| Bad input is refused at the model boundary (422), never silently accepted | `app/models.py` |
+| Input is checked no more strictly than the official contract: a missing required field is a 422 (logged by field name and kind only, never the request's text); everything the contract allows is taken — a message with no text is skipped (not the batch), a missing role is `user`, a timestamp that cannot be read as a date is "no time", an empty session id makes the batch its own session; a blank query or a `top_k` below 1 answers with no results (section 2a) | `app/models.py`, `app/main.py` |
 | The image carries the core, not only the shell | `Dockerfile`, `tests/test_docker_image.py` |
 | The evidence-recall ruler (public LoCoMo-Refined; no answering, no scoring, no cost) | `eval/ruler/` |
+
+## 2a. Why the input check was loosened (2026-10-29)
+
+The first formal evaluation stopped with `ADD_API_CONTRACT_MISMATCH · HTTP 422`: our `/add` input check was stricter than the
+official contract (it refused, for example, blank content, a timestamp before 1970, after 2100 or with a fraction, an empty session
+id, an empty message list), the platform does not retry a 422, and some batches of the evaluation data were refused. We did not log
+why a request was refused, so which of these the data hit is not known. The check now asks only what the contract asks: a required
+field must be present; everything else is taken and made usable message by message (the list in section 2). What is still refused is
+logged — which field, what kind of problem — and never the request's text. Retrieval, the storage format and the configuration did
+not change: an ordinary request is stored and answered exactly as before, and a batch sent again writes nothing twice (writes are
+idempotent per `(space_id, batch_id)`).
 
 ## 3. What came from elsewhere
 

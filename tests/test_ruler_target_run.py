@@ -31,12 +31,15 @@ def test_service_target_adds_and_searches_through_the_real_contract(tmp_path, mi
         t.close()
 
 
-def test_a_time_text_in_timestamp_is_refused_by_the_service(tmp_path):
-    """旧尺子走 HTTP 时的写法（题库的时间文字塞进毫秒字段）会整块被拒——这是形状 b 要换算成毫秒的原因。"""
+def test_a_time_text_in_timestamp_is_taken_without_a_time_by_the_service(tmp_path):
+    """旧尺子走 HTTP 时的写法（题库的时间文字塞进毫秒字段）：以前整块被拒（422），2026-10-29 起服务照收、当没有时间——
+    时间就丢了，所以形状 b 仍要换算成毫秒。"""
     t = target.ServiceTarget(str(tmp_path / "db2.sqlite"), neighbours=False)
     try:
-        status = t.add("u", "s", "r1", [{"role": "user", "content": "hello", "timestamp": "1:56 pm on 8 May, 2023"}])
-        assert status == 422
+        status = t.add("u", "s", "r1", [{"role": "user", "content": "hello Biscuit", "timestamp": "1:56 pm on 8 May, 2023"}])
+        assert status == 200
+        hits = t.search("u", "Biscuit", 10)
+        assert [h.content for h in hits] == ["[user] hello Biscuit"], "时间文字读不成毫秒：当没有时间"
     finally:
         t.close()
 

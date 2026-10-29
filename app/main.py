@@ -7,13 +7,17 @@ and the rendering. What the platform's answer model reads (`content`) is the
 candidate itself; the neighbours are candidates of their own, behind the
 NEIGHBOUR_CANDIDATES switch (on by default, the environment can turn it off).
 """
+import hashlib
+import json
 import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 
 from core import Core, CoreConfig, Record
 from core.db import Database, StoreBusy
@@ -23,6 +27,93 @@ from .config import Settings, load
 from .models import AddRequest, AddResponse, SearchHit, SearchRequest, SearchResponse
 
 log = logging.getLogger("app.main")
+
+# 2026-10-29: the shell takes an /add batch as the official contract allows and makes each message usable here; a message it
+# cannot use is skipped (logged as a count, never its content), the batch is never refused for it. See app/models.py.
+_MAX_TIMESTAMP_MS = 4102444800000          # 2100-01-01T00:00:00Z: a later time is "no time" (as before, but no longer a 422)
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _content_text(content):
+    """The text of a message's content, or None when it carries none (the message is then skipped).
+    A string as given (blank -> None); a list of text parts (strings, or objects with a "text" string) joined with single spaces;
+    a single such object; a number as its decimal text. Anything else -> None."""
+    if isinstance(content, str):
+        return content if content.strip() else None
+    if isinstance(content, bool) or content is None:
+        return None
+    if isinstance(content, (int, float)):
+        return str(content)
+    parts = content if isinstance(content, list) else [content] if isinstance(content, dict) else []
+    texts = []
+    for p in parts:
+        if isinstance(p, str):
+            texts.append(p)
+        elif isinstance(p, dict) and isinstance(p.get("text"), str):
+            texts.append(p["text"])
+    joined = " ".join(t for t in texts if t.strip())
+    return joined if joined.strip() else None
+
+
+def _timestamp_ms(value):
+    """Epoch milliseconds as an int, or None ("no time"): a number (a fraction is cut off), a string of digits / a decimal number;
+    a negative one is a time before 1970; one after 2100, not finite, or unreadable is None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = int(text)
+        except ValueError:
+            try:
+                value = float(text)
+            except ValueError:
+                return None
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        value = int(value)
+    if not isinstance(value, int) or value > _MAX_TIMESTAMP_MS:
+        return None
+    return value
+
+
+def _event_time(ms):
+    """The event time of a message, or None. The same `fromtimestamp` as before for every time it can do (the stored text of an
+    ordinary message is unchanged); a time it cannot do (before 1970 on Windows, far out of range) is computed from the epoch, and if
+    even that cannot be represented the message has no time. Never raises: a bad time must not turn into a 500."""
+    if ms is None:
+        return None
+    try:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        pass
+    try:
+        return _EPOCH + timedelta(milliseconds=ms)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def content_batch_key(user_id, session_id, kept):
+    """The idempotency key of a batch that came with an empty request id: "anon-" + the first 24 hex of a sha256 over the user id,
+    the session id and the messages as they will be stored (position, role, event time, text). The same batch sent again gives the
+    same key; a batch that differs in anything stored gives another."""
+    doc = {"user_id": user_id, "session_id": session_id,
+           "messages": [[i, role, ts.isoformat() if ts is not None else None, text] for i, (role, ts, text) in kept]}
+    raw = json.dumps(doc, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "anon-" + hashlib.sha256(raw).hexdigest()[:24]
+
+
+def normalize_message(item):
+    """One /add message -> (role, event time or None, text), or None when it is skipped (not an object, or no text)."""
+    if not isinstance(item, dict):
+        return None
+    text = _content_text(item.get("content"))
+    if text is None:
+        return None
+    role = item.get("role")
+    role = role if isinstance(role, str) else "user"
+    return role, _event_time(_timestamp_ms(item.get("timestamp"))), text
 
 # The content digest the image build stored (scripts/tree_digest.py). /health reports it as `build`, so a clone of the
 # published tag can prove it is what runs (scripts/verify_deploy.py). A local run has no such file: build is null.
@@ -93,6 +184,18 @@ def make_app(settings: Settings) -> FastAPI:
     app = FastAPI(title="agent-memory-challenge", lifespan=lifespan)
     _require_auth = make_require_api_key(settings.api_key)
 
+    @app.exception_handler(RequestValidationError)
+    async def _log_refusal(request: Request, exc: RequestValidationError):
+        # Since 2026-10-29: what is still refused (a field the contract requires is missing, or not of its type) is logged so the next refusal
+        # can be read in the service log: one line, which field (loc), what kind (type), the message (msg) — those three ONLY.
+        # pydantic's errors() also carries `input` (the request's own text, e.g. a message's content) and `url`: never logged.
+        try:
+            parts = [f"loc={'.'.join(str(x) for x in e.get('loc', ()))} type={e.get('type')} msg={e.get('msg')}" for e in exc.errors()]
+            log.warning("refused 422 %s %s: %s", request.method, request.url.path, " | ".join(parts)[:1000])
+        except Exception:                                       # the log line must never change the answer
+            pass
+        return await request_validation_exception_handler(request, exc)
+
     @app.get("/health")
     def health():
         # The lifespan sets app.state.core; if it hasn't run yet (or if the
@@ -139,22 +242,36 @@ def make_app(settings: Settings) -> FastAPI:
     def add(req: AddRequest, request: Request, _=Depends(_require_auth)):
         state = request.app.state
         records = []
-        for i, m in enumerate(req.messages):
+        kept = []
+        for i, item in enumerate(req.messages):
+            norm = normalize_message(item)
+            if norm is not None:
+                kept.append((i, norm))               # no text to keep: skipped, the rest of the batch is stored
+        skipped = len(req.messages) - len(kept)
+        # The batch key: the request id (writes are idempotent per (user_id, batch key)). An empty request id would make every such
+        # batch of one user "the same batch" and silently drop all but the first, so it is replaced by a key made of the batch's
+        # own content: sent again unchanged it is still recognised; any other batch gets another key. The reply keeps the empty id.
+        batch_key = req.request_id or content_batch_key(req.user_id, req.session_id, kept)
+        # An empty session id: the batch's own key is its session key, so batches without a session never become one
+        # session (and each other's neighbours).
+        session_key = req.session_id if req.session_id else batch_key
+        for i, (role, ts, text) in kept:
             # The official contract makes `timestamp` optional. When it is
             # missing we do NOT know when the message was said: the event time
             # stays empty and the rendering does not invent a date. The
             # ingestion time is a different thing and is kept as such.
-            ts = (datetime.fromtimestamp(m.timestamp / 1000, tz=timezone.utc)
-                  if m.timestamp is not None else None)
             stored_at = (ts.isoformat() if ts is not None
                          else datetime.now(timezone.utc).isoformat())
-            records.append(Record(record_id=f"{req.request_id}#{i}",
-                                  session_id=req.session_id,
-                                  text=m.content, speaker=m.role,
+            # record id keeps the message's position in the request as sent (a skipped message leaves a gap, nothing is renumbered)
+            records.append(Record(record_id=f"{batch_key}#{i}",
+                                  session_id=session_key,
+                                  text=text, speaker=role,
                                   ts=ts.isoformat() if ts is not None else None,
                                   created_at=stored_at))
+        if skipped:
+            log.warning("add: %d of %d message(s) skipped (no text)", skipped, len(req.messages))
         try:
-            state.core.write(records, space_id=req.user_id, batch_id=req.request_id)
+            state.core.write(records, space_id=req.user_id, batch_id=batch_key)
         except StoreBusy:
             # Lock wait exceeded; tell the platform to retry rather than 500.
             raise HTTPException(status_code=503, detail="storage busy, retry")
@@ -166,6 +283,9 @@ def make_app(settings: Settings) -> FastAPI:
     def search(req: SearchRequest, request: Request, response: Response,
                _=Depends(_require_auth)):
         state = request.app.state
+        # Since 2026-10-29: a blank query or a top_k below 1 is answered, not refused: 200 with no results
+        if not req.query.strip() or req.top_k < 1:
+            return SearchResponse(data=[])
         context = 1 if settings.neighbour_candidates else 0
         try:
             hits = state.core.search(req.query, space_id=req.user_id,

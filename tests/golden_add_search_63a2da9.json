@@ -1,0 +1,370 @@
+{
+ "neighbours_off": {
+  "add": [
+   [
+    200,
+    {
+     "request_id": "r-a",
+     "session_id": "s1",
+     "success": true,
+     "user_id": "u1"
+    }
+   ],
+   [
+    200,
+    {
+     "request_id": "r-b",
+     "session_id": "s2",
+     "success": true,
+     "user_id": "u1"
+    }
+   ],
+   [
+    200,
+    {
+     "request_id": "r-c",
+     "session_id": "s3",
+     "success": true,
+     "user_id": "u1"
+    }
+   ]
+  ],
+  "rows": [
+   [
+    "r-a#0",
+    "s1",
+    "user",
+    "2024-10-04T00:00:00.123000+00:00",
+    "the garden needs water today"
+   ],
+   [
+    "r-a#1",
+    "s1",
+    "assistant",
+    "2024-10-04T00:01:00.123000+00:00",
+    "we planted tomatoes in the garden"
+   ],
+   [
+    "r-a#2",
+    "s1",
+    "user",
+    "2024-10-04T00:02:00.123000+00:00",
+    "garden garden tomatoes harvest soon"
+   ],
+   [
+    "r-b#0",
+    "s2",
+    "user",
+    null,
+    "morning walk with the dog"
+   ],
+   [
+    "r-b#1",
+    "s2",
+    "assistant",
+    null,
+    "the dog found a tomato in the garden"
+   ],
+   [
+    "r-c#0",
+    "s3",
+    "user",
+    "1970-01-01T00:00:00+00:00",
+    "epoch zero garden note"
+   ],
+   [
+    "r-c#1",
+    "s3",
+    "system",
+    "2100-01-01T00:00:00+00:00",
+    "end of century tomatoes"
+   ],
+   [
+    "r-c#2",
+    "s3",
+    "user",
+    "2024-10-04T00:05:00.123000+00:00",
+    "  padded garden text  "
+   ]
+  ],
+  "search": [
+   [
+    "garden tomatoes",
+    10,
+    200,
+    {
+     "data": [
+      {
+       "content": "[1970-01-01 00:00] user: epoch zero garden note",
+       "created_at": "1970-01-01T00:00:00+00:00",
+       "id": "r-c#0",
+       "score": 0.015384615384615385
+      },
+      {
+       "content": "[2024-10-04 00:05] user:   padded garden text  ",
+       "created_at": "2024-10-04T00:05:00.123000+00:00",
+       "id": "r-c#2",
+       "score": 0.015151515151515152
+      },
+      {
+       "content": "[2100-01-01 00:00] system: end of century tomatoes",
+       "created_at": "2100-01-01T00:00:00+00:00",
+       "id": "r-c#1",
+       "score": 0.01639344262295082
+      },
+      {
+       "content": "[2024-10-04 00:00] user: the garden needs water today",
+       "created_at": "2024-10-04T00:00:00.123000+00:00",
+       "id": "r-a#0",
+       "score": 0.014925373134328358
+      },
+      {
+       "content": "[2024-10-04 00:01] assistant: we planted tomatoes in the garden",
+       "created_at": "2024-10-04T00:01:00.123000+00:00",
+       "id": "r-a#1",
+       "score": 0.016129032258064516
+      },
+      {
+       "content": "[2024-10-04 00:02] user: garden garden tomatoes harvest soon",
+       "created_at": "2024-10-04T00:02:00.123000+00:00",
+       "id": "r-a#2",
+       "score": 0.015873015873015872
+      },
+      {
+       "content": "[assistant] the dog found a tomato in the garden",
+       "created_at": "<ingestion time: a message without a timestamp>",
+       "id": "r-b#1",
+       "score": 0.015625
+      }
+     ]
+    }
+   ],
+   [
+    "dog",
+    5,
+    200,
+    {
+     "data": [
+      {
+       "content": "[user] morning walk with the dog",
+       "created_at": "<ingestion time: a message without a timestamp>",
+       "id": "r-b#0",
+       "score": 0.01639344262295082
+      },
+      {
+       "content": "[assistant] the dog found a tomato in the garden",
+       "created_at": "<ingestion time: a message without a timestamp>",
+       "id": "r-b#1",
+       "score": 0.016129032258064516
+      }
+     ]
+    }
+   ],
+   [
+    "water",
+    3,
+    200,
+    {
+     "data": [
+      {
+       "content": "[2024-10-04 00:00] user: the garden needs water today",
+       "created_at": "2024-10-04T00:00:00.123000+00:00",
+       "id": "r-a#0",
+       "score": 0.01639344262295082
+      }
+     ]
+    }
+   ]
+  ]
+ },
+ "neighbours_on": {
+  "add": [
+   [
+    200,
+    {
+     "request_id": "r-a",
+     "session_id": "s1",
+     "success": true,
+     "user_id": "u1"
+    }
+   ],
+   [
+    200,
+    {
+     "request_id": "r-b",
+     "session_id": "s2",
+     "success": true,
+     "user_id": "u1"
+    }
+   ],
+   [
+    200,
+    {
+     "request_id": "r-c",
+     "session_id": "s3",
+     "success": true,
+     "user_id": "u1"
+    }
+   ]
+  ],
+  "rows": [
+   [
+    "r-a#0",
+    "s1",
+    "user",
+    "2024-10-04T00:00:00.123000+00:00",
+    "the garden needs water today"
+   ],
+   [
+    "r-a#1",
+    "s1",
+    "assistant",
+    "2024-10-04T00:01:00.123000+00:00",
+    "we planted tomatoes in the garden"
+   ],
+   [
+    "r-a#2",
+    "s1",
+    "user",
+    "2024-10-04T00:02:00.123000+00:00",
+    "garden garden tomatoes harvest soon"
+   ],
+   [
+    "r-b#0",
+    "s2",
+    "user",
+    null,
+    "morning walk with the dog"
+   ],
+   [
+    "r-b#1",
+    "s2",
+    "assistant",
+    null,
+    "the dog found a tomato in the garden"
+   ],
+   [
+    "r-c#0",
+    "s3",
+    "user",
+    "1970-01-01T00:00:00+00:00",
+    "epoch zero garden note"
+   ],
+   [
+    "r-c#1",
+    "s3",
+    "system",
+    "2100-01-01T00:00:00+00:00",
+    "end of century tomatoes"
+   ],
+   [
+    "r-c#2",
+    "s3",
+    "user",
+    "2024-10-04T00:05:00.123000+00:00",
+    "  padded garden text  "
+   ]
+  ],
+  "search": [
+   [
+    "garden tomatoes",
+    10,
+    200,
+    {
+     "data": [
+      {
+       "content": "[1970-01-01 00:00] user: epoch zero garden note",
+       "created_at": "1970-01-01T00:00:00+00:00",
+       "id": "r-c#0",
+       "score": 0.015384615384615385
+      },
+      {
+       "content": "[2024-10-04 00:05] user:   padded garden text  ",
+       "created_at": "2024-10-04T00:05:00.123000+00:00",
+       "id": "r-c#2",
+       "score": 0.015151515151515152
+      },
+      {
+       "content": "[2100-01-01 00:00] system: end of century tomatoes",
+       "created_at": "2100-01-01T00:00:00+00:00",
+       "id": "r-c#1",
+       "score": 0.01639344262295082
+      },
+      {
+       "content": "[2024-10-04 00:00] user: the garden needs water today",
+       "created_at": "2024-10-04T00:00:00.123000+00:00",
+       "id": "r-a#0",
+       "score": 0.014925373134328358
+      },
+      {
+       "content": "[2024-10-04 00:01] assistant: we planted tomatoes in the garden",
+       "created_at": "2024-10-04T00:01:00.123000+00:00",
+       "id": "r-a#1",
+       "score": 0.016129032258064516
+      },
+      {
+       "content": "[2024-10-04 00:02] user: garden garden tomatoes harvest soon",
+       "created_at": "2024-10-04T00:02:00.123000+00:00",
+       "id": "r-a#2",
+       "score": 0.015873015873015872
+      },
+      {
+       "content": "[assistant] the dog found a tomato in the garden",
+       "created_at": "<ingestion time: a message without a timestamp>",
+       "id": "r-b#1",
+       "score": 0.015625
+      },
+      {
+       "content": "[user] morning walk with the dog",
+       "created_at": "<ingestion time: a message without a timestamp>",
+       "id": "r-b#1#nbr-b#0",
+       "score": 0.0
+      }
+     ]
+    }
+   ],
+   [
+    "dog",
+    5,
+    200,
+    {
+     "data": [
+      {
+       "content": "[user] morning walk with the dog",
+       "created_at": "<ingestion time: a message without a timestamp>",
+       "id": "r-b#0",
+       "score": 0.01639344262295082
+      },
+      {
+       "content": "[assistant] the dog found a tomato in the garden",
+       "created_at": "<ingestion time: a message without a timestamp>",
+       "id": "r-b#1",
+       "score": 0.016129032258064516
+      }
+     ]
+    }
+   ],
+   [
+    "water",
+    3,
+    200,
+    {
+     "data": [
+      {
+       "content": "[2024-10-04 00:00] user: the garden needs water today",
+       "created_at": "2024-10-04T00:00:00.123000+00:00",
+       "id": "r-a#0",
+       "score": 0.01639344262295082
+      },
+      {
+       "content": "[2024-10-04 00:01] assistant: we planted tomatoes in the garden",
+       "created_at": "2024-10-04T00:01:00.123000+00:00",
+       "id": "r-a#0#nbr-a#1",
+       "score": 0.0
+      }
+     ]
+    }
+   ]
+  ]
+ }
+}

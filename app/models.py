@@ -7,37 +7,22 @@ reachable when we checked on 2026-10-27; THIRD_PARTY_NOTICES.md says what we
 took from it. Checked item by item against the official API Guide
 (https://agentmemoryleaderboard.ai/api-guide) on 2026-10-27.
 """
-from typing import List, Optional
-from pydantic import BaseModel, Field, field_validator
+from typing import Any, List, Optional
+from pydantic import BaseModel
 
-# The official contract says `timestamp` is optional Unix milliseconds. We
-# refuse anything outside the range a date can carry (a bigger number would
-# blow up the renderer instead of being rejected), and we refuse empty
-# messages and empty content — the contract says content is non-empty.
-_MAX_TIMESTAMP_MS = 4102444800000          # 2100-01-01T00:00:00Z
-
-
-class Message(BaseModel):
-    role: str                      # e.g. "user" / "assistant"
-    timestamp: Optional[int] = Field(default=None, ge=0, le=_MAX_TIMESTAMP_MS)
-                                     # epoch milliseconds; the official contract
-                                     # says it is optional — a message may arrive
-                                     # without a time
-    content: str = Field(min_length=1)   # memory text
-
-    @field_validator("content")
-    @classmethod
-    def _content_not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("content must not be blank")
-        return v
-
-
+# 2026-10-29: the formal evaluation stopped on our own 422 — this model was STRICTER than the official contract (it refused
+# blank content, a timestamp before 1970 or after 2100 or with a fraction, an empty session id, an empty message list ...), and the
+# platform does not retry a 422. The contract is now the only bar: a field the contract requires must be PRESENT (a missing
+# request_id / user_id / session_id / messages is still a 422, logged by field name only); everything else is taken as it comes and
+# made usable in the shell (app/main.py, `normalize_message`): a message whose content carries no text is skipped, not the batch;
+# a role that is missing becomes "user"; a timestamp that cannot be read as a date is "no time". Retrieval is unchanged.
 class AddRequest(BaseModel):
-    request_id: str = Field(min_length=1)
-    messages: List[Message] = Field(min_length=1)
-    user_id: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
+    request_id: str                # required, may be empty (returned as given; the batch is then keyed by its content)
+    messages: List[Any]            # required, may be empty (nothing written). Each message: role (missing / not a string ->
+                                   # "user"), timestamp (epoch ms, optional; see app/main.py), content (blank / null -> the message
+                                   # is skipped; a list of text parts is joined with spaces); an item that is not an object is skipped
+    user_id: str                   # required, may be empty (returned as given)
+    session_id: str                # required, may be empty (the batch's request_id is then its session key)
 
 
 class AddResponse(BaseModel):
@@ -48,10 +33,10 @@ class AddResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    query: str = Field(min_length=1)
+    query: str                     # empty / blank -> 200 with no results (no stricter than the contract)
     options: Optional[List[str]] = None   # only present for multiple-choice items
-    user_id: str = Field(min_length=1)
-    top_k: int = Field(default=10, ge=1)  # the response must not exceed it
+    user_id: str                   # empty -> an empty space, 200 with no results
+    top_k: int = 10                # below 1 -> 200 with no results; the response never exceeds it
 
 
 class SearchHit(BaseModel):
